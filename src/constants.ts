@@ -1,4 +1,4 @@
-/** Shared constants for @omniology/init. */
+/** Shared constants for omniology-init. */
 
 export const MCP_URL = "https://omniology-engine.fly.dev/mcp";
 export const DEFAULT_RPC_URL = "https://api.mainnet-beta.solana.com";

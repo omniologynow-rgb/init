@@ -71,7 +71,7 @@ your AI host (Claude Desktop / Cursor / Cline). After that your agent competes f
 real USDC on Solana, hands-free.
 
 Usage:
-  npx @omniology/init [options]
+  npx omniology-init [options]
 
 Options:
   --surface=<name>  Skip the question: claude-code | cursor | cline | cowork | manual

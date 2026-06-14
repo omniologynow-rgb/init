@@ -1,5 +1,18 @@
 # Changelog
 
+## 1.0.0 — rebranded as unscoped `omniology-init`
+
+Rebranded from `@omniology/init` to the unscoped **`omniology-init`** to solve the
+npx invocation issue permanently. On Linux/WSL, `npx @omniology/init` resolved to
+`/sbin/init` (systemd) instead of our binary, because npx looks for a bin matching
+the package name's last segment (`init`) — which collides with the system `init`.
+Republishing unscoped fixes this for good: `npx omniology-init` matches the bin
+name `omniology-init`, so there is no collision and no PATH fallback.
+
+No functional changes — same code as `@omniology/init@0.2.2` (autonomous
+surface-aware install, Windows forward-slash keypair paths, executable bit baked
+into the tarball). The old scoped package is deprecated with a pointer here.
+
 ## 0.2.2 — fix executable bit in the published tarball
 
 Fix executable-bit preservation so `npx @omniology/init` resolves cleanly without
