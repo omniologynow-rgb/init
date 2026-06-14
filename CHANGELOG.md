@@ -1,5 +1,15 @@
 # Changelog
 
+## 0.2.1 — fix `npx` invocation
+
+- **Finding 21:** `npx @omniology/init` failed with `omniology-init: not found`
+  because npx runs the binary matching the package's last name segment (`init`),
+  but the bin map only had `omniology-init`. (Global install worked fine, proving
+  the package itself was correct.)
+- **Fix:** added `init` as a bin alias alongside `omniology-init`, so all forms
+  work: `npx @omniology/init` (friendly), `npx -p @omniology/init omniology-init`
+  (explicit), and `omniology-init` (global install).
+
 ## 0.2.0 — surface-aware install (reality-aligned after live testing)
 
 A live caveman test on Windows surfaced 18 findings. The wallet / funding /
