@@ -6,14 +6,6 @@
 import { existsSync, readdirSync } from "node:fs";
 import { join } from "node:path";
 import { homedir } from "node:os";
-import type { HostName } from "./flags.js";
-
-export interface HostInfo {
-  host: HostName;
-  label: string;
-  /** Absolute path to the host's MCP config JSON (undefined for cowork/manual). */
-  configPath?: string;
-}
 
 export interface PlatformEnv {
   platform: NodeJS.Platform;
@@ -23,18 +15,6 @@ export interface PlatformEnv {
 
 export function currentPlatform(): PlatformEnv {
   return { platform: process.platform, home: homedir(), env: process.env };
-}
-
-/** Claude Desktop config path for the platform (pure). */
-export function claudeDesktopConfigPath(p: PlatformEnv): string {
-  if (p.platform === "darwin") {
-    return join(p.home, "Library", "Application Support", "Claude", "claude_desktop_config.json");
-  }
-  if (p.platform === "win32") {
-    const appData = p.env.APPDATA ?? join(p.home, "AppData", "Roaming");
-    return join(appData, "Claude", "claude_desktop_config.json");
-  }
-  return join(p.home, ".config", "Claude", "claude_desktop_config.json");
 }
 
 export function cursorConfigPath(p: PlatformEnv): string {
@@ -89,36 +69,5 @@ export function isCowork(p: PlatformEnv): boolean {
     return existsSync("/sessions") && readdirSync("/sessions").some((s) => existsSync(join("/sessions", s, "mnt")));
   } catch {
     return false;
-  }
-}
-
-/**
- * Detect all plausible hosts on this machine (impure: checks the filesystem).
- * Order: Cowork → Claude Desktop → Cursor → Cline.
- */
-export function detectHosts(p: PlatformEnv = currentPlatform()): HostInfo[] {
-  const found: HostInfo[] = [];
-  if (isCowork(p)) found.push({ host: "cowork", label: "Cowork (sandboxed session)" });
-
-  const claude = claudeDesktopConfigPath(p);
-  if (existsSync(claude)) found.push({ host: "claude-desktop", label: "Claude Desktop", configPath: claude });
-
-  const cursor = cursorConfigPath(p);
-  if (existsSync(cursor)) found.push({ host: "cursor", label: "Cursor", configPath: cursor });
-
-  const cline = findClineConfigPath(p);
-  if (cline) found.push({ host: "cline", label: "Cline (VS Code)", configPath: cline });
-
-  return found;
-}
-
-/** Resolve a HostInfo for an explicit --host choice (no detection). */
-export function hostInfoFor(host: HostName, p: PlatformEnv = currentPlatform()): HostInfo {
-  switch (host) {
-    case "claude-desktop": return { host, label: "Claude Desktop", configPath: claudeDesktopConfigPath(p) };
-    case "cursor": return { host, label: "Cursor", configPath: cursorConfigPath(p) };
-    case "cline": return { host, label: "Cline (VS Code)", configPath: findClineConfigPath(p) };
-    case "cowork": return { host, label: "Cowork (sandboxed session)" };
-    case "manual": return { host, label: "Manual (print config)" };
   }
 }

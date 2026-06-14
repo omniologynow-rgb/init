@@ -1,11 +1,16 @@
 /** CLI flag parsing for omniology-init. */
 import { DEFAULT_MIN_SOL, DEFAULT_MIN_USDC, DEFAULT_RPC_URL } from "./constants.js";
 
-export type HostName = "claude-desktop" | "cursor" | "cline" | "cowork" | "manual";
+/** The surfaces init can install into (v0.2.0). "claude-desktop" is accepted as
+ *  a legacy alias and mapped to "claude-code" (the new unified Claude app has no
+ *  separate desktop config — Finding 1). */
+export type SurfaceId = "claude-code" | "cursor" | "cline" | "cowork" | "manual";
+/** @deprecated use SurfaceId */
+export type HostName = SurfaceId;
 
 export interface Options {
   reset: boolean;
-  host?: HostName;
+  host?: SurfaceId;
   importPath?: string;
   minSol: number;
   minUsdc: number;
@@ -16,7 +21,7 @@ export interface Options {
   help: boolean;
 }
 
-const HOSTS: HostName[] = ["claude-desktop", "cursor", "cline", "cowork", "manual"];
+const SURFACES: SurfaceId[] = ["claude-code", "cursor", "cline", "cowork", "manual"];
 
 export function parseArgs(argv: string[]): Options {
   const o: Options = {
@@ -39,9 +44,12 @@ export function parseArgs(argv: string[]): Options {
       case "-h":
       case "--help": o.help = true; break;
       case "--host":
-        if (val && (HOSTS as string[]).includes(val)) o.host = val as HostName;
-        else throw new Error(`--host must be one of: ${HOSTS.join(", ")}`);
+      case "--surface": {
+        const v = val === "claude-desktop" ? "claude-code" : val; // legacy alias
+        if (v && (SURFACES as string[]).includes(v)) o.host = v as SurfaceId;
+        else throw new Error(`--surface must be one of: ${SURFACES.join(", ")}`);
         break;
+      }
       case "--import": if (val) o.importPath = val; break;
       case "--rpc-url": if (val) o.rpcUrl = val; break;
       case "--min-sol": if (val !== undefined) o.minSol = Number(val); break;
@@ -66,7 +74,8 @@ Usage:
   npx @omniology/init [options]
 
 Options:
-  --host=<name>     Skip host detection: claude-desktop | cursor | cline | cowork | manual
+  --surface=<name>  Skip the question: claude-code | cursor | cline | cowork | manual
+                    (--host is accepted as an alias)
   --import=<path>   Use an existing Solana keypair file instead of generating one
   --reset           Erase ~/.omniology and start fresh
   --min-usdc=<n>    USDC needed before continuing (default ${DEFAULT_MIN_USDC})

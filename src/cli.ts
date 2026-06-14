@@ -1,29 +1,20 @@
 /**
- * omniology-init — one-command setup for an autonomous Omniology agent.
+ * omniology-init — one-command setup for an autonomous Omniology agent (v0.2.0).
  *
- * 5 steps: detect host → create/load wallet → fund (the only human action) →
- * register → write host config. Plain English throughout; the only crypto the
- * user ever sees is a wallet address to send USDC to.
+ * Flow: pick where to run (Claude Code recommended) → create/load wallet → fund
+ * once (the only human action) → register → route the MCP install for that
+ * surface → verify → print the exact prompt to paste. Plain English throughout.
  */
 import { existsSync, rmSync, readFileSync } from "node:fs";
 import { createInterface } from "node:readline/promises";
 import { Connection, Keypair, PublicKey } from "@solana/web3.js";
-import { parseArgs, HELP_TEXT, type Options } from "./flags.js";
+import { parseArgs, HELP_TEXT, type Options, type SurfaceId } from "./flags.js";
 import { banner, box, step, ok, warn, info, arrow, c } from "./ui.js";
 import { omniologyDir, keypairPath, agentPath, type AgentRecord } from "./paths.js";
-import {
-  detectHosts,
-  hostInfoFor,
-  currentPlatform,
-  type HostInfo,
-} from "./hosts.js";
-import {
-  readConfig,
-  mcpConfigMerge,
-  writeConfigAtomic,
-  manualConfigSnippet,
-  type OmniologyServerEnv,
-} from "./config.js";
+import { writeConfigAtomic } from "./config.js";
+import { detectSurfaces } from "./surfaces/detect.js";
+import { installSurface } from "./surfaces/index.js";
+import type { InstallResult } from "./surfaces/types.js";
 import { generateKeypair, loadKeypair, saveKeypair, printAddressQr } from "./wallet.js";
 import { pollUntilFunded } from "./funding.js";
 import { registerAgent } from "./register.js";
@@ -59,29 +50,28 @@ function fail(message: string, debug?: unknown, debugOn = false): never {
   process.exit(1);
 }
 
-// ── Step 1: host ────────────────────────────────────────────────────────────
-async function resolveHost(opts: Options): Promise<HostInfo> {
-  step(1, TOTAL_STEPS, "Detecting your AI host…");
+// ── Step 1: where do you want to run your agent? ─────────────────────────────
+async function resolveSurface(opts: Options): Promise<SurfaceId> {
+  step(1, TOTAL_STEPS, "Where do you want to run your agent?");
   if (opts.host) {
-    const info = hostInfoFor(opts.host);
-    ok(`Using ${info.label} (from --host)`);
-    return info;
+    ok(`Using ${opts.host} (from --surface)`);
+    return opts.host;
   }
-  const found = detectHosts();
-  if (found.length === 0) {
-    warn("No supported AI host detected — I'll print manual setup instructions at the end.");
-    return hostInfoFor("manual");
-  }
-  if (found.length === 1) {
-    ok(`Found: ${found[0]!.label}`);
-    return found[0]!;
-  }
-  info(`Found ${found.length} hosts:`);
-  found.forEach((h, i) => arrow(`${i + 1}. ${h.label}`));
-  const pick = await ask(`Which one? [1-${found.length}, default 1]: `, "1");
-  const idx = Math.min(Math.max(parseInt(pick, 10) || 1, 1), found.length) - 1;
-  ok(`Using ${found[idx]!.label}`);
-  return found[idx]!;
+  const avail = detectSurfaces();
+  avail.forEach((s, i) => {
+    const tag = s.id !== "manual" && s.installed ? c.green(" (detected)") : "";
+    arrow(`${i + 1}. ${s.label}${tag}`);
+  });
+  const def =
+    avail.find((s) => s.recommended && s.installed) ??
+    avail.find((s) => s.installed && s.id !== "manual") ??
+    avail.find((s) => s.id === "manual")!;
+  const defIdx = avail.indexOf(def) + 1;
+  const pick = await ask(`Pick a number [default ${defIdx} = ${def.label}]: `, String(defIdx));
+  const idx = Math.min(Math.max(parseInt(pick, 10) || defIdx, 1), avail.length) - 1;
+  const chosen = avail[idx]!;
+  ok(`Using ${chosen.label}`);
+  return chosen.id;
 }
 
 // ── Step 2: wallet ───────────────────────────────────────────────────────────
@@ -165,7 +155,6 @@ async function fundWallet(opts: Options, kp: Keypair): Promise<void> {
 async function register(opts: Options, kp: Keypair): Promise<AgentRecord> {
   step(4, TOTAL_STEPS, "Registering your agent with Omniology…");
 
-  // Reuse an existing registration if we already have one for this wallet.
   if (existsSync(agentPath())) {
     try {
       const rec = JSON.parse(readFileSync(agentPath(), "utf8")) as AgentRecord;
@@ -174,7 +163,7 @@ async function register(opts: Options, kp: Keypair): Promise<AgentRecord> {
         return rec;
       }
     } catch {
-      /* fall through and re-register */
+      /* re-register */
     }
   }
 
@@ -192,7 +181,7 @@ async function register(opts: Options, kp: Keypair): Promise<AgentRecord> {
   info(`By continuing you accept the Terms of Service at ${TERMS_URL}.`);
   let res;
   try {
-    res = await registerAgent(kp, { email, displayName: undefined });
+    res = await registerAgent(kp, { email });
   } catch (err) {
     fail(err instanceof Error ? err.message : String(err), err, opts.debug);
   }
@@ -210,67 +199,11 @@ async function register(opts: Options, kp: Keypair): Promise<AgentRecord> {
   return record;
 }
 
-// ── Step 5: configure host ──────────────────────────────────────────────────
-function configureHost(host: HostInfo, kp: Keypair, agent: AgentRecord): { restartNeeded: boolean } {
-  step(5, TOTAL_STEPS, `Configuring ${host.label}…`);
-  const env: OmniologyServerEnv = {
-    OMNIOLOGY_KEYPAIR_PATH: keypairPath(),
-    OMNIOLOGY_AGENT_ID: agent.agent_id,
-  };
-
-  if (host.host === "cowork") {
-    info("Cowork connects to Omniology over the web (it can't run the local signer).");
-    arrow("In the chat panel: '+' → Connectors → Add Custom Connector");
-    arrow("Name: omniology   URL: https://omniology-engine.fly.dev/mcp");
-    info("If you already have the omniology connector, you're done — no action needed.");
-    warn("Your wallet lives in this session. Save the keypair (or import it to Phantom) before the session ends.");
-    info("For a persistent, fully-autonomous agent, run this on your own machine with Claude Desktop instead.");
-    return { restartNeeded: false };
-  }
-
-  if (host.host === "manual" || !host.configPath) {
-    info("Add this to your AI host's MCP config (it preserves any servers you already have):");
-    console.log("");
-    console.log(manualConfigSnippet(env).split("\n").map((l) => "    " + l).join("\n"));
-    console.log("");
-    return { restartNeeded: true };
-  }
-
-  let existing: Record<string, unknown>;
-  try {
-    existing = readConfig(host.configPath);
-  } catch {
-    warn(`Your ${host.label} config at ${host.configPath} isn't valid JSON, so I didn't touch it.`);
-    info("Add this entry manually (under mcpServers):");
-    console.log("");
-    console.log(manualConfigSnippet(env).split("\n").map((l) => "    " + l).join("\n"));
-    return { restartNeeded: true };
-  }
-
-  const merged = mcpConfigMerge(existing, env);
-  if (merged.alreadyPresent) {
-    ok("Omniology connector already configured — leaving it as-is.");
-    info("No restart needed — it'll use your agent automatically.");
-    return { restartNeeded: false };
-  }
-  writeConfigAtomic(host.configPath, merged.config);
-  ok(`MCP config updated at ${host.configPath}`);
-  ok("Your existing MCP servers were preserved.");
-  return { restartNeeded: true };
-}
-
-function successBox(host: HostInfo, restartNeeded: boolean): void {
+function successBox(result: InstallResult): void {
   const lines: string[] = [c.bold(c.green("✓ Setup complete!")), ""];
-  if (restartNeeded) {
-    if (host.host === "manual") lines.push("Add the config above, then restart your AI host.");
-    else lines.push(`Restart ${host.label} to load Omniology.`);
-  } else if (host.host === "cowork") {
-    lines.push("Add the connector above (or open your current session).");
-  } else {
-    lines.push(`Open ${host.label} — you're ready.`);
-  }
+  lines.push(result.openHint);
   lines.push("");
-  lines.push("Then just tell your agent:");
+  lines.push("Then tell your agent:");
   lines.push(c.cyan('  "Compete in Omniology contests for me —'));
   lines.push(c.cyan('   keep playing until I tell you to stop."'));
   lines.push("");
@@ -296,12 +229,19 @@ async function main(): Promise<void> {
     }
   }
 
-  const host = await resolveHost(opts);
+  const surface = await resolveSurface(opts);
   const kp = await resolveWallet(opts);
   await fundWallet(opts, kp);
   const agent = await register(opts, kp);
-  const { restartNeeded } = configureHost(host, kp, agent);
-  successBox(host, restartNeeded);
+
+  step(5, TOTAL_STEPS, "Connecting Omniology to your agent…");
+  const result = await installSurface(surface, {
+    keypairPath: keypairPath(),
+    agentId: agent.agent_id,
+    opts,
+  });
+
+  successBox(result);
 }
 
 main().catch((err) => {

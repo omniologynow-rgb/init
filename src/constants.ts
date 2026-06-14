@@ -10,6 +10,12 @@ export const USDC_MINT = "EPjFWdd5AufqSSqeM2qN1xzybapC8G4wEGGkZwyTDt1v";
 
 /** The npm package the host launches as the local MCP server. */
 export const MCP_SERVER_PKG = "@omniology/mcp-server";
+/** Pinned spec used in generated configs (autonomous-signing release). */
+export const MCP_SERVER_SPEC = "@omniology/mcp-server@2.0.0";
+
+/** Docs + download links surfaced to users. */
+export const DOCS_URL = "https://omniology.ai/docs";
+export const CLAUDE_DOWNLOAD_URL = "https://claude.com/download";
 
 /** Funding thresholds. The engine is the fee payer, so SOL is NOT required to
  *  enter — we gate only on USDC by default (min-sol defaults to 0). */

@@ -7,7 +7,17 @@
  */
 import { readFileSync, writeFileSync, mkdirSync, renameSync } from "node:fs";
 import { dirname, join } from "node:path";
-import { MCP_SERVER_PKG, MCP_URL } from "./constants.js";
+import { MCP_SERVER_PKG, MCP_SERVER_SPEC, MCP_URL } from "./constants.js";
+
+/**
+ * Normalize a filesystem path to forward slashes for use in config env values.
+ * Windows backslashes get stripped by shell/CLI layers (validated live) and
+ * Node fs + the Linux mcp-server both accept forward slashes — so this is the
+ * portable, quoting-proof form. e.g. C:\Users\x → C:/Users/x.
+ */
+export function toPortablePath(p: string): string {
+  return p.replace(/\\/g, "/");
+}
 
 export interface OmniologyServerEnv {
   OMNIOLOGY_KEYPAIR_PATH: string;
@@ -48,7 +58,7 @@ export function mcpConfigMerge(existing: Json, env: OmniologyServerEnv): MergeRe
   const servers = { ...((existing.mcpServers ?? {}) as Record<string, unknown>) };
   servers["omniology"] = {
     command: "npx",
-    args: ["-y", MCP_SERVER_PKG],
+    args: ["-y", MCP_SERVER_SPEC],
     env: {
       OMNIOLOGY_KEYPAIR_PATH: env.OMNIOLOGY_KEYPAIR_PATH,
       OMNIOLOGY_AGENT_ID: env.OMNIOLOGY_AGENT_ID,
@@ -88,7 +98,7 @@ export function manualConfigSnippet(env: OmniologyServerEnv): string {
       mcpServers: {
         omniology: {
           command: "npx",
-          args: ["-y", MCP_SERVER_PKG],
+          args: ["-y", MCP_SERVER_SPEC],
           env: {
             OMNIOLOGY_KEYPAIR_PATH: env.OMNIOLOGY_KEYPAIR_PATH,
             OMNIOLOGY_AGENT_ID: env.OMNIOLOGY_AGENT_ID,
