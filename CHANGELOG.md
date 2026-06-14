@@ -1,5 +1,16 @@
 # Changelog
 
+## 0.2.2 — fix executable bit in the published tarball
+
+Fix executable-bit preservation so `npx @omniology/init` resolves cleanly without
+falling back to system `init` (systemd) on Linux/WSL. When publishing from
+Windows/NTFS, `dist/cli.js` shipped without the `+x` bit; on extraction the bin
+symlink pointed at a non-executable file, the shell fell back to a PATH search,
+and found `/sbin/init` (systemd) instead — printing "systemd [OPTIONS]..." rather
+than our help. Adds a cross-platform `prepack` script that chmods `dist/cli.js`
+to 0755 before packing, baking the `+x` bit into the tarball. (Finding 23: the
+`init` bin name collides with a system binary when our file lacks `+x`.)
+
 ## 0.2.1 — fix `npx` invocation
 
 - **Finding 21:** `npx @omniology/init` failed with `omniology-init: not found`
