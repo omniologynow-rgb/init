@@ -1,0 +1,59 @@
+{
+  "name": "@omniology/init",
+  "version": "0.1.0",
+  "description": "One-command setup for an autonomous Omniology agent: creates a wallet, helps you fund it once, registers your agent, and configures your AI host (Claude Desktop / Cursor / Cline). Then your agent competes for real USDC on Solana — hands-free.",
+  "type": "module",
+  "bin": {
+    "omniology-init": "dist/cli.js"
+  },
+  "files": [
+    "dist",
+    "README.md",
+    "LICENSE"
+  ],
+  "scripts": {
+    "build": "tsup",
+    "start": "node dist/cli.js",
+    "test:unit": "tsx test/run.ts",
+    "prepublishOnly": "npm run build"
+  },
+  "keywords": [
+    "omniology",
+    "mcp",
+    "solana",
+    "usdc",
+    "ai-agent",
+    "onboarding",
+    "cli",
+    "claude",
+    "cursor",
+    "cline",
+    "wallet"
+  ],
+  "author": "OMNIOLOGY",
+  "license": "MIT",
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/omniologynow-rgb/init.git"
+  },
+  "homepage": "https://github.com/omniologynow-rgb/init#readme",
+  "bugs": {
+    "url": "https://github.com/omniologynow-rgb/init/issues"
+  },
+  "engines": {
+    "node": ">=18"
+  },
+  "dependencies": {
+    "@noble/curves": "^1.6.0",
+    "@solana/web3.js": "^1.95.0",
+    "bs58": "^6.0.0",
+    "qrcode-terminal": "^0.12.0"
+  },
+  "devDependencies": {
+    "@types/node": "^22.10.0",
+    "@types/qrcode-terminal": "^0.12.2",
+    "tsup": "^8.3.5",
+    "tsx": "^4.19.0",
+    "typescript": "^5.7.2"
+  }
+}
