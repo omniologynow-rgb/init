@@ -8,6 +8,9 @@ export interface InstallContext {
   keypairPath: string;
   agentId: string;
   opts: Options;
+  /** Reconfigure: overwrite an existing omniology entry (to @latest) instead of
+   *  skipping when it's already present. */
+  force?: boolean;
 }
 
 export interface InstallResult {

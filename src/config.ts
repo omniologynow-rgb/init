@@ -67,6 +67,24 @@ export function mcpConfigMerge(existing: Json, env: OmniologyServerEnv): MergeRe
   return { config: { ...existing, mcpServers: servers }, alreadyPresent: false };
 }
 
+/**
+ * Like mcpConfigMerge but ALWAYS (re)writes the omniology entry — used by
+ * --reconfigure to update an existing connector to @latest. Preserves all other
+ * servers.
+ */
+export function mcpConfigUpsert(existing: Json, env: OmniologyServerEnv): Json {
+  const servers = { ...((existing.mcpServers ?? {}) as Record<string, unknown>) };
+  servers["omniology"] = {
+    command: "npx",
+    args: ["-y", MCP_SERVER_SPEC],
+    env: {
+      OMNIOLOGY_KEYPAIR_PATH: env.OMNIOLOGY_KEYPAIR_PATH,
+      OMNIOLOGY_AGENT_ID: env.OMNIOLOGY_AGENT_ID,
+    },
+  };
+  return { ...existing, mcpServers: servers };
+}
+
 /** Parse a config file, tolerating a missing file (→ {}) but not malformed JSON. */
 export function readConfig(path: string): Json {
   let raw: string;
