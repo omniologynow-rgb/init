@@ -10,6 +10,7 @@ import { mcpConfigMerge, hasOmniologyServer, readConfig, toPortablePath } from "
 import { meetsThreshold, pollUntilFunded } from "../src/funding.js";
 import { buildRegisterProof } from "../src/register.js";
 import { parseArgs } from "../src/flags.js";
+import { generateDisplayName } from "../src/names.js";
 import { detectSurfaces, claudeCodeInstalled } from "../src/surfaces/detect.js";
 import { buildAddArgs, install as installClaudeCode, claudeAddCommand } from "../src/surfaces/claude-code.js";
 import { install as installCursor } from "../src/surfaces/cursor.js";
@@ -116,6 +117,25 @@ section("funding + register + flags (retained)");
   try { parseArgs(["--surface=nope"]); } catch { threw = true; }
   check("rejects bad surface", threw);
   void cursorConfigPath;
+}
+
+section("v1.1.0 — display name + withdraw flags");
+{
+  const name = generateDisplayName(() => 0.5);
+  check("display name format claude-{adj}-{noun}-{4digits}", /^claude-[a-z]+-[a-z]+-\d{4}$/.test(name), name);
+
+  check("--name parses", parseArgs(["--name=duck-joker-9000"]).displayName === "duck-joker-9000");
+
+  const w = parseArgs(["--withdraw", "--to=AbcDef", "--amount=2.5"]);
+  check("--withdraw parses", w.withdraw === true && w.to === "AbcDef" && w.amount === 2.5);
+  check("--withdraw without --amount = full balance (undefined)", parseArgs(["--withdraw", "--to=X"]).amount === undefined);
+
+  let t1 = false;
+  try { parseArgs(["--withdraw"]); } catch { t1 = true; }
+  check("--withdraw requires --to", t1);
+  let t2 = false;
+  try { parseArgs(["--withdraw", "--to=X", "--amount=0"]); } catch { t2 = true; }
+  check("--amount must be > 0", t2);
 }
 
 console.log(`\nSummary: passed ${passed}, failed ${failed}`);

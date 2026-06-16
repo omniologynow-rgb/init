@@ -17,6 +17,7 @@ export interface AgentRecord {
   agent_id: string;
   wallet_address: string;
   email?: string;
+  display_name?: string;
   registered_at: string;
   network: "mainnet";
 }

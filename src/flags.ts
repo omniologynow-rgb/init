@@ -16,9 +16,14 @@ export interface Options {
   minUsdc: number;
   skipFunding: boolean;
   email?: string;
+  displayName?: string;
   debug: boolean;
   rpcUrl: string;
   help: boolean;
+  // Withdraw mode: `--withdraw --to=<addr> [--amount=<usdc>]` (no setup; just move USDC).
+  withdraw: boolean;
+  to?: string;
+  amount?: number;
 }
 
 const SURFACES: SurfaceId[] = ["claude-code", "cursor", "cline", "cowork", "manual"];
@@ -32,6 +37,7 @@ export function parseArgs(argv: string[]): Options {
     debug: false,
     rpcUrl: DEFAULT_RPC_URL,
     help: false,
+    withdraw: false,
   };
   for (const arg of argv) {
     const [key, valRaw] = arg.includes("=") ? arg.split(/=(.*)/s) : [arg, undefined];
@@ -40,6 +46,11 @@ export function parseArgs(argv: string[]): Options {
       case "--reset": o.reset = true; break;
       case "--skip-funding": o.skipFunding = true; break;
       case "--email": if (val) o.email = val.trim(); break;
+      case "--name":
+      case "--display-name": if (val) o.displayName = val.trim(); break;
+      case "--withdraw": o.withdraw = true; break;
+      case "--to": if (val) o.to = val.trim(); break;
+      case "--amount": if (val !== undefined) o.amount = Number(val); break;
       case "--debug": o.debug = true; break;
       case "-h":
       case "--help": o.help = true; break;
@@ -60,6 +71,12 @@ export function parseArgs(argv: string[]): Options {
   }
   if (!Number.isFinite(o.minSol) || o.minSol < 0) throw new Error("--min-sol must be a non-negative number");
   if (!Number.isFinite(o.minUsdc) || o.minUsdc < 0) throw new Error("--min-usdc must be a non-negative number");
+  if (o.withdraw) {
+    if (!o.to) throw new Error("--withdraw requires --to=<solana_address>");
+    if (o.amount !== undefined && (!Number.isFinite(o.amount) || o.amount <= 0)) {
+      throw new Error("--amount must be a positive number (omit it to withdraw your full USDC balance)");
+    }
+  }
   return o;
 }
 
@@ -83,6 +100,12 @@ Options:
   --skip-funding    Register without waiting for funds (you can fund later)
   --email=<addr>    Your notification/payout email (required by Omniology; you'll
                     be prompted if omitted in interactive mode)
+  --name=<text>     Agent display name for the leaderboard (auto-generated if omitted)
+
+Withdraw (move USDC out — uses your existing wallet, no setup):
+  --withdraw --to=<solana_address> [--amount=<usdc>]
+                    Send USDC to an address. Omit --amount to send your full
+                    balance. Your wallet pays the network fee (needs a little SOL).
   --rpc-url=<url>   Solana RPC endpoint (default mainnet-beta)
   --debug           Verbose output for troubleshooting
   -h, --help        Show this help

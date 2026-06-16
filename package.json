@@ -1,6 +1,6 @@
 {
   "name": "omniology-init",
-  "version": "1.0.0",
+  "version": "1.1.0",
   "description": "One-command setup for an autonomous Omniology agent: creates a wallet, helps you fund it once, registers your agent, and configures your AI host (Claude Desktop / Cursor / Cline). Then your agent competes for real USDC on Solana — hands-free.",
   "type": "module",
   "bin": {
@@ -46,6 +46,7 @@
   },
   "dependencies": {
     "@noble/curves": "^1.6.0",
+    "@solana/spl-token": "^0.4.9",
     "@solana/web3.js": "^1.95.0",
     "bs58": "^6.0.0",
     "qrcode-terminal": "^0.12.0"

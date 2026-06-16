@@ -18,6 +18,8 @@ import type { InstallResult } from "./surfaces/types.js";
 import { generateKeypair, loadKeypair, saveKeypair, printAddressQr } from "./wallet.js";
 import { pollUntilFunded } from "./funding.js";
 import { registerAgent } from "./register.js";
+import { withdraw } from "./withdraw.js";
+import { generateDisplayName } from "./names.js";
 import {
   DASHBOARD_URL,
   TERMS_URL,
@@ -48,6 +50,24 @@ function fail(message: string, debug?: unknown, debugOn = false): never {
   if (debugOn && debug) console.error(debug);
   console.log("");
   process.exit(1);
+}
+
+/** Prominent SEND-USDC-(SOL-optional) banner shown above the funding QR. */
+function printSolWarning(): void {
+  const band = "══════════════════════════════════════════════════════";
+  console.log("");
+  console.log("  " + c.yellow(band));
+  console.log("  " + c.bold(c.yellow("⚠️  IMPORTANT: SEND ")) + c.bold(c.green("USDC")) + c.bold(c.yellow(" TO COMPETE")));
+  console.log("  " + c.yellow(band));
+  console.log("  Your agent uses " + c.green("USDC") + " for contest entries — Omniology");
+  console.log("  pays the Solana network fees while competing.");
+  console.log("");
+  console.log("  " + c.bold("OPTIONAL:") + " If you plan to later withdraw winnings to a");
+  console.log("  personal wallet, send ~0.005 SOL too so your agent");
+  console.log("  can pay the withdraw transaction fee. (Skip this if");
+  console.log("  you'd rather keep winnings in your agent wallet for");
+  console.log("  continued competing — no SOL needed for entries.)");
+  console.log("  " + c.yellow(band));
 }
 
 // ── Step 1: where do you want to run your agent? ─────────────────────────────
@@ -112,6 +132,7 @@ async function resolveWallet(opts: Options): Promise<Keypair> {
 async function fundWallet(opts: Options, kp: Keypair): Promise<void> {
   step(3, TOTAL_STEPS, "Fund your wallet (the only thing you need to do)");
   const address = kp.publicKey.toBase58();
+  printSolWarning();
   console.log("");
   console.log("  Send USDC (Solana) to this address:");
   console.log("");
@@ -119,8 +140,7 @@ async function fundWallet(opts: Options, kp: Keypair): Promise<void> {
   console.log("");
   await printAddressQr(address);
   console.log(
-    `  Suggested first deposit: ${c.bold(`${SUGGESTED_USDC} USDC`)} (a few contest entries). ` +
-      "You do NOT need SOL — Omniology pays the network fees.",
+    `  Suggested first deposit: ${c.bold(c.green(`${SUGGESTED_USDC} USDC`))} (a few contest entries).`,
   );
 
   if (opts.skipFunding) {
@@ -178,10 +198,22 @@ async function register(opts: Options, kp: Keypair): Promise<AgentRecord> {
     fail("A valid email is required to register (Omniology sends payout + tax notices there). Re-run with --email=you@example.com.");
   }
 
+  // Display name: flag → prompt (press ENTER to auto-generate) → auto-gen fallback.
+  let displayName = opts.displayName;
+  if (!displayName) {
+    const suggested = generateDisplayName();
+    const answer = await ask(
+      `What should we call your agent? (e.g. 'duck-joker-9000'). Press ENTER for "${suggested}": `,
+      suggested,
+    );
+    displayName = answer || suggested;
+  }
+  ok(`Agent name: ${displayName}`);
+
   info(`By continuing you accept the Terms of Service at ${TERMS_URL}.`);
   let res;
   try {
-    res = await registerAgent(kp, { email });
+    res = await registerAgent(kp, { email, displayName });
   } catch (err) {
     fail(err instanceof Error ? err.message : String(err), err, opts.debug);
   }
@@ -190,6 +222,7 @@ async function register(opts: Options, kp: Keypair): Promise<AgentRecord> {
     agent_id: res.agent_id,
     wallet_address: kp.publicKey.toBase58(),
     email,
+    display_name: displayName,
     registered_at: new Date().toISOString(),
     network: "mainnet",
   };
@@ -211,6 +244,33 @@ function successBox(result: InstallResult): void {
   box(lines);
 }
 
+// ── Withdraw mode (--withdraw) ────────────────────────────────────────────────
+async function runWithdraw(opts: Options): Promise<void> {
+  step(1, 1, "Withdraw USDC from your agent wallet");
+  const path = keypairPath();
+  if (!existsSync(path)) {
+    fail(`No agent wallet found at ${path}. Run \`npx omniology-init\` first (or pass --import).`);
+  }
+  const kp = loadKeypair(path);
+  const connection = new Connection(opts.rpcUrl, "confirmed");
+  info(`From wallet: ${kp.publicKey.toBase58()}`);
+  info(opts.amount !== undefined ? `Amount: ${opts.amount} USDC` : "Amount: full USDC balance");
+  info(`To: ${opts.to}`);
+  let res;
+  try {
+    res = await withdraw(connection, kp, opts.to!, opts.amount);
+  } catch (err) {
+    fail(err instanceof Error ? err.message : String(err), err, opts.debug);
+  }
+  box([
+    c.bold(c.green("✓ Withdrawal sent")),
+    "",
+    `${res.amount_usdc} USDC → ${res.destination}`,
+    "",
+    c.dim(`Transaction: https://solscan.io/tx/${res.signature}`),
+  ]);
+}
+
 async function main(): Promise<void> {
   const opts = parseArgs(process.argv.slice(2));
   if (opts.help) {
@@ -219,6 +279,12 @@ async function main(): Promise<void> {
   }
 
   banner();
+
+  // Withdraw mode: move USDC out using the existing wallet, no setup flow.
+  if (opts.withdraw) {
+    await runWithdraw(opts);
+    return;
+  }
 
   if (opts.reset) {
     if (existsSync(omniologyDir())) {

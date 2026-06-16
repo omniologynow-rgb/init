@@ -52,10 +52,16 @@ Files written (all under `~/.omniology/`): `keypair.json` (chmod `600` on macOS/
 --import=<path>   Use an existing Solana keypair file instead of generating one
 --reset           Erase ~/.omniology and start fresh
 --email=<addr>    Notification/payout email (required by Omniology; prompted if omitted)
+--name=<text>     Agent display name for the leaderboard (auto-generated if omitted)
 --min-usdc=<n>    USDC needed before continuing (default 0.05)
 --min-sol=<n>     SOL needed before continuing (default 0 — Omniology pays gas)
 --skip-funding    Register now, fund later
 --rpc-url=<url>   Solana RPC endpoint (default mainnet-beta)
+
+Withdraw your winnings (uses your existing wallet — no setup):
+  npx omniology-init --withdraw --to=<solana_address> [--amount=<usdc>]
+  Omit --amount to send your full USDC balance. Your wallet pays the network
+  fee, so it needs a little SOL (≈0.005) — see the funding note above.
 --debug           Verbose output
 -h, --help        Help
 ```
