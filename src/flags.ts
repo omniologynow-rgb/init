@@ -24,6 +24,9 @@ export interface Options {
   withdraw: boolean;
   to?: string;
   amount?: number;
+  // Reconfigure mode: re-run ONLY the MCP install at @latest for an existing
+  // wallet+agent (no wallet regen, no re-register, no prompts).
+  reconfigure: boolean;
 }
 
 const SURFACES: SurfaceId[] = ["claude-code", "cursor", "cline", "cowork", "manual"];
@@ -38,6 +41,7 @@ export function parseArgs(argv: string[]): Options {
     rpcUrl: DEFAULT_RPC_URL,
     help: false,
     withdraw: false,
+    reconfigure: false,
   };
   for (const arg of argv) {
     const [key, valRaw] = arg.includes("=") ? arg.split(/=(.*)/s) : [arg, undefined];
@@ -51,6 +55,7 @@ export function parseArgs(argv: string[]): Options {
       case "--withdraw": o.withdraw = true; break;
       case "--to": if (val) o.to = val.trim(); break;
       case "--amount": if (val !== undefined) o.amount = Number(val); break;
+      case "--reconfigure": o.reconfigure = true; break;
       case "--debug": o.debug = true; break;
       case "-h":
       case "--help": o.help = true; break;
@@ -101,6 +106,10 @@ Options:
   --email=<addr>    Your notification/payout email (required by Omniology; you'll
                     be prompted if omitted in interactive mode)
   --name=<text>     Agent display name for the leaderboard (auto-generated if omitted)
+
+  --reconfigure     Re-run ONLY the MCP install at @latest for your existing
+                    wallet + agent (no wallet regen, no re-register, no prompts).
+                    Use this to pick up a new @omniology/mcp-server version.
 
 Withdraw (move USDC out — uses your existing wallet, no setup):
   --withdraw --to=<solana_address> [--amount=<usdc>]

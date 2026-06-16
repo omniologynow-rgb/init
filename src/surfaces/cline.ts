@@ -4,7 +4,7 @@
  * Atomic write, preserving existing entries.
  */
 import { currentPlatform, findClineConfigPath } from "../hosts.js";
-import { readConfig, mcpConfigMerge, writeConfigAtomic, manualConfigSnippet, toPortablePath } from "../config.js";
+import { readConfig, mcpConfigMerge, mcpConfigUpsert, writeConfigAtomic, manualConfigSnippet, toPortablePath } from "../config.js";
 import { ok, warn, info } from "../ui.js";
 import type { InstallContext, InstallResult } from "./types.js";
 
@@ -31,13 +31,18 @@ export async function install(ctx: InstallContext, pathOverride?: string): Promi
     return { ok: false, verified: null, openHint: "Add the entry above to Cline's settings, then restart VS Code." };
   }
 
-  const merged = mcpConfigMerge(existing, env);
-  if (merged.alreadyPresent) {
-    ok("Omniology connector already in Cline's settings — leaving it as-is.");
-    return { ok: true, verified: true, openHint: "Restart VS Code if you haven't — Omniology is ready." };
+  if (ctx.force) {
+    writeConfigAtomic(path, mcpConfigUpsert(existing, env));
+    ok(`Updated Omniology in ${path} → @latest (existing servers preserved).`);
+  } else {
+    const merged = mcpConfigMerge(existing, env);
+    if (merged.alreadyPresent) {
+      ok("Omniology connector already in Cline's settings — leaving it as-is.");
+      return { ok: true, verified: true, openHint: "Restart VS Code if you haven't — Omniology is ready." };
+    }
+    writeConfigAtomic(path, merged.config);
+    ok(`Added Omniology to ${path} (existing servers preserved).`);
   }
-  writeConfigAtomic(path, merged.config);
-  ok(`Added Omniology to ${path} (existing servers preserved).`);
 
   const verified = (() => {
     try {

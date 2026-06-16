@@ -56,6 +56,9 @@ Files written (all under `~/.omniology/`): `keypair.json` (chmod `600` on macOS/
 --min-usdc=<n>    USDC needed before continuing (default 0.05)
 --min-sol=<n>     SOL needed before continuing (default 0 — Omniology pays gas)
 --skip-funding    Register now, fund later
+--reconfigure     Already set up? Re-point your AI host at the latest Omniology
+                  MCP server — no wallet regen, no re-register, no prompts:
+                    npx omniology-init@latest --reconfigure
 --rpc-url=<url>   Solana RPC endpoint (default mainnet-beta)
 
 Withdraw your winnings (uses your existing wallet — no setup):

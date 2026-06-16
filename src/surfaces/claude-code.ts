@@ -30,6 +30,11 @@ export function buildAddArgs(keypairPath: string, agentId: string): string[] {
 }
 
 export async function install(ctx: InstallContext, exec: Exec = defaultExec): Promise<InstallResult> {
+  // Reconfigure: `claude mcp add` errors if the server already exists, so remove
+  // it first to force a clean re-add at @latest. Ignore the result (it's fine if
+  // it wasn't there).
+  if (ctx.force) exec("claude", ["mcp", "remove", "omniology", "--scope", "user"]);
+
   const args = buildAddArgs(ctx.keypairPath, ctx.agentId);
   const add = exec("claude", args);
 

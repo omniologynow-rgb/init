@@ -6,7 +6,7 @@ import { mkdtempSync, writeFileSync, readFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { cursorConfigPath, type PlatformEnv } from "../src/hosts.js";
-import { mcpConfigMerge, hasOmniologyServer, readConfig, toPortablePath } from "../src/config.js";
+import { mcpConfigMerge, mcpConfigUpsert, hasOmniologyServer, readConfig, toPortablePath } from "../src/config.js";
 import { meetsThreshold, pollUntilFunded } from "../src/funding.js";
 import { buildRegisterProof } from "../src/register.js";
 import { parseArgs } from "../src/flags.js";
@@ -52,8 +52,8 @@ section("claude code: add args");
   check("adds omniology at user scope", args.includes("omniology") && args.includes("--scope") && args.includes("user"));
   check("keypair env uses forward slashes", args.includes("OMNIOLOGY_KEYPAIR_PATH=C:/Users/bro/.omniology/keypair.json"));
   check("agent id env present", args.includes("OMNIOLOGY_AGENT_ID=agent-uuid-1"));
-  check("pins @2.0.0 after the -- separator", args.indexOf("--") < args.indexOf("@omniology/mcp-server@2.0.0"));
-  check("human command string is well-formed", /claude mcp add omniology --scope user .* -- npx -y @omniology\/mcp-server@2\.0\.0/.test(claudeAddCommand({ keypairPath: "/k", agentId: "a", opts: {} as never })));
+  check("uses @latest after the -- separator", args.indexOf("--") < args.indexOf("@omniology/mcp-server@latest"));
+  check("human command string is well-formed", /claude mcp add omniology --scope user .* -- npx -y @omniology\/mcp-server@latest/.test(claudeAddCommand({ keypairPath: "/k", agentId: "a", opts: {} as never })));
 }
 
 section("claude code: install (mocked exec)");
@@ -84,7 +84,7 @@ section("cursor install preserves existing entries (temp file)");
   check("preserved existing filesystem server", !!back.mcpServers.filesystem);
   check("added omniology with forward-slash keypair path", back.mcpServers.omniology.env.OMNIOLOGY_KEYPAIR_PATH === "C:/Users/bro/.omniology/keypair.json");
   check("added omniology with agent id", back.mcpServers.omniology.env.OMNIOLOGY_AGENT_ID === "agent-xyz");
-  check("pins @2.0.0", back.mcpServers.omniology.args.join(" ").includes("@omniology/mcp-server@2.0.0"));
+  check("uses @latest", back.mcpServers.omniology.args.join(" ").includes("@omniology/mcp-server@latest"));
   // idempotency
   const r2 = await installCursor(ctx, cfg);
   check("re-run detects already-present", r2.ok && r2.verified === true);
@@ -136,6 +136,34 @@ section("v1.1.0 — display name + withdraw flags");
   let t2 = false;
   try { parseArgs(["--withdraw", "--to=X", "--amount=0"]); } catch { t2 = true; }
   check("--amount must be > 0", t2);
+}
+
+section("v1.2.0 — reconfigure (force overwrite to @latest)");
+{
+  check("--reconfigure parses", parseArgs(["--reconfigure"]).reconfigure === true);
+
+  // upsert overwrites an existing (stale) omniology entry and preserves others.
+  const env = { OMNIOLOGY_KEYPAIR_PATH: "/k.json", OMNIOLOGY_AGENT_ID: "a-9" };
+  const existing = {
+    mcpServers: {
+      other: { command: "x" },
+      omniology: { command: "npx", args: ["-y", "@omniology/mcp-server@2.0.0"], env: { OMNIOLOGY_AGENT_ID: "old" } },
+    },
+  };
+  const up = mcpConfigUpsert(existing, env);
+  const servers = up.mcpServers as Record<string, { args: string[]; env: Record<string, string> }>;
+  const omni = servers.omniology!;
+  check("upsert overwrites omniology to @latest", omni.args.join(" ").includes("@omniology/mcp-server@latest"));
+  check("upsert refreshes agent id", omni.env.OMNIOLOGY_AGENT_ID === "a-9");
+  check("upsert preserves other servers", !!(up.mcpServers as Record<string, unknown>).other);
+
+  // cursor install with force overwrites even when omniology already present.
+  const dir = mkdtempSync(join(tmpdir(), "omni-reconf-"));
+  const cfg = join(dir, "mcp.json");
+  writeFileSync(cfg, JSON.stringify({ mcpServers: { omniology: { command: "npx", args: ["-y", "@omniology/mcp-server@2.0.0"], env: {} } } }));
+  const r = await installCursor({ keypairPath: "/k.json", agentId: "a-9", opts: {} as never, force: true }, cfg);
+  const back = JSON.parse(readFileSync(cfg, "utf8"));
+  check("force install updates existing entry to @latest", r.ok && back.mcpServers.omniology.args.join(" ").includes("@latest"));
 }
 
 console.log(`\nSummary: passed ${passed}, failed ${failed}`);

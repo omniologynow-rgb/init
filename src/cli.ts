@@ -11,9 +11,11 @@ import { Connection, Keypair, PublicKey } from "@solana/web3.js";
 import { parseArgs, HELP_TEXT, type Options, type SurfaceId } from "./flags.js";
 import { banner, box, step, ok, warn, info, arrow, c } from "./ui.js";
 import { omniologyDir, keypairPath, agentPath, type AgentRecord } from "./paths.js";
-import { writeConfigAtomic } from "./config.js";
+import { writeConfigAtomic, readConfig, hasOmniologyServer } from "./config.js";
 import { detectSurfaces } from "./surfaces/detect.js";
 import { installSurface } from "./surfaces/index.js";
+import { defaultExec } from "./surfaces/exec.js";
+import { currentPlatform, cursorConfigPath, findClineConfigPath } from "./hosts.js";
 import type { InstallResult } from "./surfaces/types.js";
 import { generateKeypair, loadKeypair, saveKeypair, printAddressQr } from "./wallet.js";
 import { pollUntilFunded } from "./funding.js";
@@ -271,6 +273,67 @@ async function runWithdraw(opts: Options): Promise<void> {
   ]);
 }
 
+// ── Reconfigure mode (--reconfigure) ──────────────────────────────────────────
+
+/** Find which surface already has an omniology connector configured, if any. */
+function findConfiguredSurface(): SurfaceId | null {
+  const p = currentPlatform();
+  // Claude Code: ask the CLI.
+  const list = defaultExec("claude", ["mcp", "list"]);
+  if (!list.spawnError && /omniology/i.test(list.stdout)) return "claude-code";
+  // Cursor / Cline: read their config files.
+  for (const [id, path] of [
+    ["cursor", cursorConfigPath(p)] as const,
+    ["cline", findClineConfigPath(p)] as const,
+  ]) {
+    if (!path) continue;
+    try {
+      if (hasOmniologyServer(readConfig(path))) return id;
+    } catch {
+      /* unreadable → skip */
+    }
+  }
+  return null;
+}
+
+async function runReconfigure(opts: Options): Promise<void> {
+  step(1, 1, "Reconfigure — update Omniology to the latest MCP server");
+  // Existing wallet + agent are required; no regen, no re-register.
+  if (!existsSync(keypairPath())) {
+    fail("No existing setup found. Run `npx omniology-init` first.");
+  }
+  let agent: AgentRecord;
+  try {
+    agent = JSON.parse(readFileSync(agentPath(), "utf8")) as AgentRecord;
+    if (!agent.agent_id) throw new Error("no agent_id");
+  } catch {
+    fail("No existing setup found. Run `npx omniology-init` first.");
+  }
+  const kp = loadKeypair(keypairPath());
+  if (agent.wallet_address && agent.wallet_address !== kp.publicKey.toBase58()) {
+    warn("Your keypair and saved agent.json don't match — reconfiguring with the saved agent_id anyway.");
+  }
+  ok(`Found existing keypair: ${keypairPath()}`);
+  ok(`Found existing agent: ${agent.agent_id}`);
+
+  // Surface: explicit --surface wins; else the one already configured; else
+  // auto-detect the recommended host.
+  const surface =
+    opts.host ??
+    findConfiguredSurface() ??
+    detectSurfaces().find((s) => s.installed && s.id !== "manual")?.id ??
+    "manual";
+
+  const result = await installSurface(surface, {
+    keypairPath: keypairPath(),
+    agentId: agent.agent_id,
+    opts,
+    force: true,
+  });
+  console.log("");
+  ok(`Done${result.verified ? " (verified)" : ""}. ${result.openHint}`);
+}
+
 async function main(): Promise<void> {
   const opts = parseArgs(process.argv.slice(2));
   if (opts.help) {
@@ -283,6 +346,12 @@ async function main(): Promise<void> {
   // Withdraw mode: move USDC out using the existing wallet, no setup flow.
   if (opts.withdraw) {
     await runWithdraw(opts);
+    return;
+  }
+
+  // Reconfigure mode: re-run only the MCP install at @latest, no prompts.
+  if (opts.reconfigure) {
+    await runReconfigure(opts);
     return;
   }
 

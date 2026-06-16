@@ -10,8 +10,10 @@ export const USDC_MINT = "EPjFWdd5AufqSSqeM2qN1xzybapC8G4wEGGkZwyTDt1v";
 
 /** The npm package the host launches as the local MCP server. */
 export const MCP_SERVER_PKG = "@omniology/mcp-server";
-/** Pinned spec used in generated configs (autonomous-signing release). */
-export const MCP_SERVER_SPEC = "@omniology/mcp-server@2.0.0";
+/** Spec used in generated configs. @latest so npx always fetches the newest
+ *  autonomous server (new tools/fixes) on each host launch; --reconfigure
+ *  rewrites existing configs to this too. */
+export const MCP_SERVER_SPEC = "@omniology/mcp-server@latest";
 
 /** Docs + download links surfaced to users. */
 export const DOCS_URL = "https://omniology.ai/docs";

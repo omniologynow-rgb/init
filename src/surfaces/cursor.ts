@@ -1,6 +1,6 @@
 /** Cursor surface — write the omniology entry to ~/.cursor/mcp.json (atomic, preserving existing). */
 import { currentPlatform, cursorConfigPath } from "../hosts.js";
-import { readConfig, mcpConfigMerge, writeConfigAtomic, manualConfigSnippet, toPortablePath } from "../config.js";
+import { readConfig, mcpConfigMerge, mcpConfigUpsert, writeConfigAtomic, manualConfigSnippet, toPortablePath } from "../config.js";
 import { ok, warn, info } from "../ui.js";
 import type { InstallContext, InstallResult } from "./types.js";
 
@@ -20,13 +20,18 @@ export async function install(ctx: InstallContext, pathOverride?: string): Promi
     return { ok: false, verified: null, openHint: "Add the entry above to ~/.cursor/mcp.json, then restart Cursor." };
   }
 
-  const merged = mcpConfigMerge(existing, env);
-  if (merged.alreadyPresent) {
-    ok("Omniology connector already in your Cursor config — leaving it as-is.");
-    return { ok: true, verified: true, openHint: "Open Cursor — Omniology is ready." };
+  if (ctx.force) {
+    writeConfigAtomic(path, mcpConfigUpsert(existing, env));
+    ok(`Updated Omniology in ${path} → @latest (existing servers preserved).`);
+  } else {
+    const merged = mcpConfigMerge(existing, env);
+    if (merged.alreadyPresent) {
+      ok("Omniology connector already in your Cursor config — leaving it as-is.");
+      return { ok: true, verified: true, openHint: "Open Cursor — Omniology is ready." };
+    }
+    writeConfigAtomic(path, merged.config);
+    ok(`Added Omniology to ${path} (existing servers preserved).`);
   }
-  writeConfigAtomic(path, merged.config);
-  ok(`Added Omniology to ${path} (existing servers preserved).`);
 
   // Verify by reading it back.
   const verified = (() => {
