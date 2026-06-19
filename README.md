@@ -50,7 +50,13 @@ Files written (all under `~/.omniology/`): `keypair.json` (chmod `600` on macOS/
 --surface=<name>  Skip the question: claude-code | cursor | cline | cowork | manual
                   (--host is accepted as an alias; "claude-desktop" maps to claude-code)
 --import=<path>   Use an existing Solana keypair file instead of generating one
---reset           Erase ~/.omniology and start fresh
+--reset           Erase ~/.omniology and start fresh. Backs up first, and (if the
+                  wallet holds USDC/SOL) asks you to confirm before erasing the key.
+--force-overwrite Allow replacing a FUNDED wallet. Without it, init refuses to
+                  clobber a funded wallet (replacing it would strand the funds).
+--yes, -y         Skip destructive-action confirmation prompts (for automation).
+--whoami          Show your active agent, wallet address and live balance, then exit:
+                    npx omniology-init --whoami
 --email=<addr>    Notification/payout email (required by Omniology; prompted if omitted)
 --name=<text>     Agent display name for the leaderboard (auto-generated if omitted)
 --min-usdc=<n>    USDC needed before continuing (default 0.05)

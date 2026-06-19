@@ -4,3 +4,7 @@ dist/
 *.log
 .DS_Store
 *.tsbuildinfo
+
+# Local agent state (contains the wallet secret key — never commit)
+.omniology/
+.omniology.bak/
