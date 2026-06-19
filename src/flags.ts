@@ -27,6 +27,12 @@ export interface Options {
   // Reconfigure mode: re-run ONLY the MCP install at @latest for an existing
   // wallet+agent (no wallet regen, no re-register, no prompts).
   reconfigure: boolean;
+  // Whoami mode: print the active agent + wallet + live balance, then exit.
+  whoami: boolean;
+  // Safety: allow replacing a FUNDED keypair (otherwise we refuse + back up).
+  forceOverwrite: boolean;
+  // Safety: skip the destructive-action confirmation prompt (for automation).
+  yes: boolean;
 }
 
 const SURFACES: SurfaceId[] = ["claude-code", "cursor", "cline", "cowork", "manual"];
@@ -42,6 +48,9 @@ export function parseArgs(argv: string[]): Options {
     help: false,
     withdraw: false,
     reconfigure: false,
+    whoami: false,
+    forceOverwrite: false,
+    yes: false,
   };
   for (const arg of argv) {
     const [key, valRaw] = arg.includes("=") ? arg.split(/=(.*)/s) : [arg, undefined];
@@ -56,6 +65,10 @@ export function parseArgs(argv: string[]): Options {
       case "--to": if (val) o.to = val.trim(); break;
       case "--amount": if (val !== undefined) o.amount = Number(val); break;
       case "--reconfigure": o.reconfigure = true; break;
+      case "--whoami": o.whoami = true; break;
+      case "--force-overwrite": o.forceOverwrite = true; break;
+      case "-y":
+      case "--yes": o.yes = true; break;
       case "--debug": o.debug = true; break;
       case "-h":
       case "--help": o.help = true; break;
@@ -99,7 +112,13 @@ Options:
   --surface=<name>  Skip the question: claude-code | cursor | cline | cowork | manual
                     (--host is accepted as an alias)
   --import=<path>   Use an existing Solana keypair file instead of generating one
-  --reset           Erase ~/.omniology and start fresh
+  --reset           Erase ~/.omniology and start fresh. Backs up first, and (if
+                    the wallet holds USDC/SOL) asks you to confirm. Combine with
+                    --yes to skip the prompt in automation.
+  --force-overwrite Allow replacing a FUNDED wallet keypair. Without it, init
+                    refuses to clobber a funded wallet (it would strand the funds).
+  --yes, -y         Skip destructive-action confirmation prompts (automation).
+  --whoami          Show your active agent, wallet address and live balance, then exit.
   --min-usdc=<n>    USDC needed before continuing (default ${DEFAULT_MIN_USDC})
   --min-sol=<n>     SOL needed before continuing (default ${DEFAULT_MIN_SOL} — Omniology pays gas)
   --skip-funding    Register without waiting for funds (you can fund later)

@@ -18,7 +18,8 @@ import { defaultExec } from "./surfaces/exec.js";
 import { currentPlatform, cursorConfigPath, findClineConfigPath } from "./hosts.js";
 import type { InstallResult } from "./surfaces/types.js";
 import { generateKeypair, loadKeypair, saveKeypair, printAddressQr } from "./wallet.js";
-import { pollUntilFunded } from "./funding.js";
+import { pollUntilFunded, getBalances } from "./funding.js";
+import { inspectExistingWallet, backupOmniologyDir, decideOverwrite } from "./safety.js";
 import { registerAgent } from "./register.js";
 import { withdraw } from "./withdraw.js";
 import { generateDisplayName } from "./names.js";
@@ -52,6 +53,23 @@ function fail(message: string, debug?: unknown, debugOn = false): never {
   if (debugOn && debug) console.error(debug);
   console.log("");
   process.exit(1);
+}
+
+/**
+ * Confirm a destructive action. Prints `message`, then: --yes proceeds; an
+ * interactive TTY asks for an explicit "yes"; a non-interactive run without
+ * --yes returns false (the caller decides how to bail). Never wipes silently.
+ */
+async function confirmDestructive(opts: Options, message: string): Promise<boolean> {
+  console.log("");
+  console.log("  " + message.split("\n").join("\n  "));
+  if (opts.yes) {
+    info("Proceeding (--yes).");
+    return true;
+  }
+  if (!interactive) return false;
+  const ans = await ask("Type 'yes' to proceed [yes/N]: ", "n");
+  return ans.trim().toLowerCase() === "yes";
 }
 
 /** Prominent SEND-USDC-(SOL-optional) banner shown above the funding QR. */
@@ -96,16 +114,49 @@ async function resolveSurface(opts: Options): Promise<SurfaceId> {
   return chosen.id;
 }
 
+/**
+ * Guard before we overwrite the keypair at `path`. Refuses to clobber a FUNDED
+ * wallet unless --force-overwrite is given, and always backs up the existing
+ * setup first. `newAddress` is the wallet we'd be writing (so re-importing the
+ * same key is recognised as a no-op rather than a destructive overwrite).
+ */
+async function guardOverwrite(opts: Options, path: string, newAddress?: string): Promise<void> {
+  const existing = await inspectExistingWallet(path, opts.rpcUrl, loadKeypair);
+  const decision = decideOverwrite(existing, newAddress, opts.forceOverwrite);
+
+  if (decision.action === "blocked") {
+    const { address, balances } = decision.status;
+    fail(
+      `Refusing to overwrite a FUNDED wallet.\n` +
+        `    ${address}\n` +
+        `    holds ${balances.usdc.toFixed(2)} USDC / ${balances.sol.toFixed(4)} SOL — its private key is at ${path}.\n` +
+        `  Replacing it now would strand those funds. Options:\n` +
+        `    • Keep competing with it: re-run without --import and choose "existing".\n` +
+        `    • Move the funds out first: npx omniology-init --withdraw --to=<your_address>\n` +
+        `    • Really replace it anyway: re-run with --force-overwrite (the old key is backed up first).`,
+    );
+  }
+
+  // proceed / forced: back up whatever's there before we replace it.
+  if (existing) {
+    const bak = backupOmniologyDir();
+    if (decision.action === "forced") {
+      warn(`Overwriting funded wallet ${decision.status.address} (--force-overwrite).`);
+    }
+    if (bak) info(`Backed up previous setup → ${bak}`);
+  }
+}
+
 // ── Step 2: wallet ───────────────────────────────────────────────────────────
-async function resolveWallet(opts: Options): Promise<Keypair> {
+async function resolveWallet(opts: Options, importedKp?: Keypair): Promise<Keypair> {
   step(2, TOTAL_STEPS, "Setting up your agent wallet…");
   const path = keypairPath();
 
-  if (opts.importPath) {
-    const kp = loadKeypair(opts.importPath);
-    saveKeypair(path, kp);
-    ok(`Imported wallet ${kp.publicKey.toBase58().slice(0, 8)}… → ${path}`);
-    return kp;
+  if (importedKp) {
+    await guardOverwrite(opts, path, importedKp.publicKey.toBase58());
+    saveKeypair(path, importedKp);
+    ok(`Imported wallet ${importedKp.publicKey.toBase58().slice(0, 8)}… → ${path}`);
+    return importedKp;
   }
 
   if (existsSync(path)) {
@@ -115,6 +166,7 @@ async function resolveWallet(opts: Options): Promise<Keypair> {
       "existing",
     );
     if (choice.toLowerCase().startsWith("f")) {
+      await guardOverwrite(opts, path); // generating a new key clobbers the existing one
       const kp = generateKeypair();
       saveKeypair(path, kp);
       ok(`New wallet created → ${path}`);
@@ -334,6 +386,74 @@ async function runReconfigure(opts: Options): Promise<void> {
   ok(`Done${result.verified ? " (verified)" : ""}. ${result.openHint}`);
 }
 
+// ── Whoami mode (--whoami) ────────────────────────────────────────────────────
+async function runWhoami(opts: Options): Promise<void> {
+  step(1, 1, "Your Omniology agent");
+  const path = keypairPath();
+  if (!existsSync(path)) {
+    info("No agent wallet found. Run `npx omniology-init` to set one up.");
+    return;
+  }
+  const kp = loadKeypair(path);
+  const address = kp.publicKey.toBase58();
+  let agentId = "—";
+  let displayName = "—";
+  if (existsSync(agentPath())) {
+    try {
+      const rec = JSON.parse(readFileSync(agentPath(), "utf8")) as AgentRecord;
+      agentId = rec.agent_id ?? "—";
+      displayName = rec.display_name ?? "—";
+    } catch {
+      /* unreadable agent.json → show wallet only */
+    }
+  }
+  const connection = new Connection(opts.rpcUrl, "confirmed");
+  const b = await getBalances(connection, kp.publicKey);
+  box([
+    c.bold("Active Omniology agent"),
+    "",
+    `Name:     ${displayName}`,
+    `Agent ID: ${agentId}`,
+    `Wallet:   ${address}`,
+    `Balance:  ${c.green(b.usdc.toFixed(2) + " USDC")} / ${b.sol.toFixed(4)} SOL`,
+    c.dim(`Keypair:  ${path}`),
+  ]);
+}
+
+// ── Reset (--reset) — balance-checked, confirmed, backed up ────────────────────
+async function performReset(opts: Options): Promise<void> {
+  const dir = omniologyDir();
+  if (!existsSync(dir)) {
+    info("Nothing to reset.");
+    return;
+  }
+  const existing = await inspectExistingWallet(keypairPath(), opts.rpcUrl, loadKeypair);
+  if (existing?.hasFunds) {
+    const proceed = await confirmDestructive(
+      opts,
+      c.yellow("⚠️  This wallet still holds funds:") +
+        `\n  ${existing.address}\n` +
+        `  ${existing.balances.usdc.toFixed(2)} USDC / ${existing.balances.sol.toFixed(4)} SOL\n` +
+        c.bold("--reset erases its private key. Those funds become unrecoverable."),
+    );
+    if (!proceed) {
+      if (!interactive) {
+        fail(
+          "Refusing to --reset a funded wallet without confirmation. " +
+            "Re-run with --yes to proceed, or move the funds out first with " +
+            "`npx omniology-init --withdraw --to=<your_address>`.",
+        );
+      }
+      info("Reset cancelled — your wallet is untouched.");
+      process.exit(0);
+    }
+  }
+  const bak = backupOmniologyDir();
+  if (bak) info(`Backed up previous setup → ${bak}`);
+  rmSync(dir, { recursive: true, force: true });
+  ok(`Reset: removed ${dir}`);
+}
+
 async function main(): Promise<void> {
   const opts = parseArgs(process.argv.slice(2));
   if (opts.help) {
@@ -342,6 +462,12 @@ async function main(): Promise<void> {
   }
 
   banner();
+
+  // Whoami mode: print the active agent + wallet + balance, then exit.
+  if (opts.whoami) {
+    await runWhoami(opts);
+    return;
+  }
 
   // Withdraw mode: move USDC out using the existing wallet, no setup flow.
   if (opts.withdraw) {
@@ -355,17 +481,29 @@ async function main(): Promise<void> {
     return;
   }
 
-  if (opts.reset) {
-    if (existsSync(omniologyDir())) {
-      rmSync(omniologyDir(), { recursive: true, force: true });
-      ok(`Reset: removed ${omniologyDir()}`);
-    } else {
-      info("Nothing to reset.");
+  // Read the --import keypair into memory BEFORE any reset. `--reset --import`
+  // used to delete ~/.omniology (and the import source inside it) first, then
+  // ENOENT on read → an empty new wallet, funds stranded. Load it up front.
+  let importedKp: Keypair | undefined;
+  if (opts.importPath) {
+    try {
+      importedKp = loadKeypair(opts.importPath);
+    } catch (err) {
+      fail(
+        `Couldn't read the keypair to --import at ${opts.importPath}: ` +
+          (err instanceof Error ? err.message : String(err)),
+        err,
+        opts.debug,
+      );
     }
   }
 
+  if (opts.reset) {
+    await performReset(opts);
+  }
+
   const surface = await resolveSurface(opts);
-  const kp = await resolveWallet(opts);
+  const kp = await resolveWallet(opts, importedKp);
   await fundWallet(opts, kp);
   const agent = await register(opts, kp);
 

@@ -2,9 +2,10 @@
 import { Keypair } from "@solana/web3.js";
 import { ed25519 } from "@noble/curves/ed25519";
 import bs58 from "bs58";
-import { mkdtempSync, writeFileSync, readFileSync } from "node:fs";
+import { mkdtempSync, writeFileSync, readFileSync, existsSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
+import { decideOverwrite, backupOmniologyDir, type WalletStatus } from "../src/safety.js";
 import { cursorConfigPath, type PlatformEnv } from "../src/hosts.js";
 import { mcpConfigMerge, mcpConfigUpsert, hasOmniologyServer, readConfig, toPortablePath } from "../src/config.js";
 import { meetsThreshold, pollUntilFunded } from "../src/funding.js";
@@ -164,6 +165,44 @@ section("v1.2.0 — reconfigure (force overwrite to @latest)");
   const r = await installCursor({ keypairPath: "/k.json", agentId: "a-9", opts: {} as never, force: true }, cfg);
   const back = JSON.parse(readFileSync(cfg, "utf8"));
   check("force install updates existing entry to @latest", r.ok && back.mcpServers.omniology.args.join(" ").includes("@latest"));
+}
+
+section("v1.3.0 — wallet safety flags");
+{
+  check("--whoami parses", parseArgs(["--whoami"]).whoami === true);
+  check("--force-overwrite parses", parseArgs(["--force-overwrite"]).forceOverwrite === true);
+  check("--yes parses", parseArgs(["--yes"]).yes === true);
+  check("-y is an alias for --yes", parseArgs(["-y"]).yes === true);
+  // The #1 regression: --reset and --import are independently captured so main()
+  // can read the import keypair BEFORE the reset wipes ~/.omniology.
+  const both = parseArgs(["--reset", "--import=/tmp/key.json"]);
+  check("--reset + --import both captured", both.reset === true && both.importPath === "/tmp/key.json");
+  check("safety flags default false", (() => { const o = parseArgs([]); return !o.whoami && !o.forceOverwrite && !o.yes; })());
+}
+
+section("v1.3.0 — decideOverwrite (funded-wallet guard)");
+{
+  const funded: WalletStatus = { address: "WALLET_A", balances: { sol: 0.01, usdc: 5 }, hasFunds: true };
+  const empty: WalletStatus = { address: "WALLET_A", balances: { sol: 0, usdc: 0 }, hasFunds: false };
+  check("no existing wallet → proceed", decideOverwrite(null, "WALLET_B", false).action === "proceed");
+  check("empty existing wallet → proceed", decideOverwrite(empty, "WALLET_B", false).action === "proceed");
+  check("funded + different new key + no force → blocked", decideOverwrite(funded, "WALLET_B", false).action === "blocked");
+  check("funded + re-import SAME key → proceed (no clobber)", decideOverwrite(funded, "WALLET_A", false).action === "proceed");
+  check("funded + --force-overwrite → forced", decideOverwrite(funded, "WALLET_B", true).action === "forced");
+  const blocked = decideOverwrite(funded, "WALLET_B", false);
+  check("blocked carries the funded status for messaging", blocked.action === "blocked" && blocked.status.balances.usdc === 5);
+}
+
+section("v1.3.0 — backupOmniologyDir (backup-before-wipe)");
+{
+  const src = mkdtempSync(join(tmpdir(), "omni-src-"));
+  const bakRoot = mkdtempSync(join(tmpdir(), "omni-bak-"));
+  writeFileSync(join(src, "keypair.json"), "[1,2,3]");
+  const dest = backupOmniologyDir(() => 1_700_000_000_000, src, bakRoot);
+  check("backup returns a path", typeof dest === "string" && dest!.startsWith(bakRoot));
+  check("backup copies the keypair", !!dest && existsSync(join(dest, "keypair.json")) && readFileSync(join(dest, "keypair.json"), "utf8") === "[1,2,3]");
+  const missing = backupOmniologyDir(() => 1, join(tmpdir(), "omni-does-not-exist-zzz"), bakRoot);
+  check("backup of missing dir → null", missing === null);
 }
 
 console.log(`\nSummary: passed ${passed}, failed ${failed}`);

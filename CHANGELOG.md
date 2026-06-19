@@ -1,5 +1,34 @@
 # Changelog
 
+## 1.3.0 — wallet-safety bundle (P0: no more permanent fund loss)
+
+Three post-launch incidents where setup destroyed real money. All three are now
+guarded; the wallet/funding/registration flow is otherwise unchanged.
+
+- **`--reset --import` no longer deletes the wallet it's importing.** `--reset`
+  used to run first and `rmSync(~/.omniology)` — including the keypair `--import`
+  pointed at — so the subsequent read hit ENOENT and a fresh empty wallet was
+  created (a real user lost 1 USDC this way). `main()` now reads the `--import`
+  keypair into memory *before* any reset.
+- **Refuse to overwrite a FUNDED wallet.** A second `init` (or `--import`) used to
+  silently overwrite an existing keypair, abandoning the first agent's funded
+  wallet (the MCP server then signed as the wrong key → "unknown signer"). Init
+  now checks the on-chain balance and refuses to clobber a funded wallet unless
+  `--force-overwrite` is passed. Re-importing the *same* address is recognised and
+  allowed. (`decideOverwrite()` is pure and unit-tested.)
+- **`--reset` confirms before wiping a funded wallet.** It now reads the on-chain
+  balance and, if there's USDC/SOL, requires an explicit `yes` (or `--yes`/`-y`
+  for automation). A non-interactive funded reset without `--yes` aborts loudly.
+- **Backup-before-wipe.** Any destructive write first copies `~/.omniology` to a
+  timestamped `~/.omniology.bak/<ts>/`.
+- **New `--whoami`** prints the active agent, wallet address and live balance.
+- **New flags:** `--force-overwrite`, `--yes`/`-y`, `--whoami`.
+
+Deferred to a follow-up (needs `@omniology/mcp-server` coordination): per-agent
+named keypair files (`~/.omniology/keypairs/<agent_id>.json`) and `--agent-id`
+active-key switching for running multiple agents on one machine. The funded-wallet
+guard above makes the current single-keypair model safe in the meantime.
+
 ## 1.0.0 — rebranded as unscoped `omniology-init`
 
 Rebranded from `@omniology/init` to the unscoped **`omniology-init`** to solve the
