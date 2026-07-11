@@ -1,5 +1,6 @@
 /* Unit tests for @omniology/init v0.2.0. Run: npm run test:unit */
-import { Keypair } from "@solana/web3.js";
+import { Keypair, PublicKey, Transaction } from "@solana/web3.js";
+import { createApproveCheckedInstruction } from "@solana/spl-token";
 import { ed25519 } from "@noble/curves/ed25519";
 import bs58 from "bs58";
 import { mkdtempSync, writeFileSync, readFileSync, existsSync } from "node:fs";
@@ -16,6 +17,11 @@ import { detectSurfaces, claudeCodeInstalled } from "../src/surfaces/detect.js";
 import { buildAddArgs, install as installClaudeCode, claudeAddCommand } from "../src/surfaces/claude-code.js";
 import { install as installCursor } from "../src/surfaces/cursor.js";
 import type { Exec, ExecResult } from "../src/surfaces/types.js";
+import { VAULT_AUTHORITY_PINNED, USDC_MINT } from "../src/constants.js";
+import { assertPinnedDelegate, extractApproveDelegate, DelegateGuardError } from "../src/onboarding/tx-guard.js";
+import { firstIncompleteGate, type OnboardStatus } from "../src/onboarding/gates.js";
+import { OnboardApiError, type OnboardApi, type Gate6Payload } from "../src/onboarding/api.js";
+import { runGates, passwordPolicyReason, suggestUsernames, type OnboardIo, type WalletGate, type GateDeps, type OnboardInputs } from "../src/onboarding/flow.js";
 
 let passed = 0, failed = 0;
 const check = (n: string, c: boolean, d = "") => {
@@ -203,6 +209,219 @@ section("v1.3.0 — backupOmniologyDir (backup-before-wipe)");
   check("backup copies the keypair", !!dest && existsSync(join(dest, "keypair.json")) && readFileSync(join(dest, "keypair.json"), "utf8") === "[1,2,3]");
   const missing = backupOmniologyDir(() => 1, join(tmpdir(), "omni-does-not-exist-zzz"), bakRoot);
   check("backup of missing dir → null", missing === null);
+}
+
+// ── v1.4.0 — gate-5 delegate guard (fail-closed) ─────────────────────────────
+section("v1.4.0 — delegate guard (approve_checked)");
+{
+  // Build a real ApproveChecked tx toward a chosen delegate, serialized base64.
+  const buildApproveB64 = (delegate: PublicKey): string => {
+    const owner = Keypair.generate().publicKey;
+    const ata = Keypair.generate().publicKey;
+    const ix = createApproveCheckedInstruction(ata, new PublicKey(USDC_MINT), delegate, owner, 1_000_000n, 6);
+    const tx = new Transaction().add(ix);
+    tx.feePayer = owner;
+    tx.recentBlockhash = "11111111111111111111111111111111"; // 32 zero bytes → valid blockhash form
+    return tx.serialize({ requireAllSignatures: false }).toString("base64");
+  };
+
+  const pinned = VAULT_AUTHORITY_PINNED;
+  const goodTx = buildApproveB64(new PublicKey(pinned));
+  const evilTx = buildApproveB64(Keypair.generate().publicKey);
+
+  check("extracts the pinned delegate from a valid approve", extractApproveDelegate(goodTx) === pinned);
+  let okPass = true;
+  try { assertPinnedDelegate(goodTx, pinned, pinned); } catch { okPass = false; }
+  check("accepts an approve toward the pinned vault authority", okPass);
+
+  let rejectedWrongOnTx = false;
+  try { assertPinnedDelegate(evilTx, pinned, pinned); } catch (e) { rejectedWrongOnTx = e instanceof DelegateGuardError; }
+  check("REJECTS an approve whose on-tx delegate is not pinned", rejectedWrongOnTx);
+
+  let rejectedWrongReported = false;
+  try { assertPinnedDelegate(goodTx, "SomeOtherDelegate1111111111111111111111111", pinned); }
+  catch (e) { rejectedWrongReported = e instanceof DelegateGuardError; }
+  check("REJECTS when the server-reported delegate mismatches the pinned key", rejectedWrongReported);
+
+  let rejectedGarbage = false;
+  try { assertPinnedDelegate("not-base64-@@@", pinned, pinned); } catch (e) { rejectedGarbage = e instanceof DelegateGuardError; }
+  check("REJECTS an undecodable transaction", rejectedGarbage);
+}
+
+// ── v1.4.0 — password policy + username suggestions (pure) ───────────────────
+section("v1.4.0 — password policy + username suggestions");
+{
+  check("rejects short password", passwordPolicyReason("Ab1!") !== null);
+  check("rejects missing symbol", passwordPolicyReason("Abcdef123456") !== null);
+  check("accepts a strong password", passwordPolicyReason("Abcdef123!@#x") === null);
+  const alts = suggestUsernames("cool guy!");
+  check("suggests sanitized alternates", alts.length === 4 && alts[0] === "coolguy-1" && !alts.join("").includes(" "));
+}
+
+// ── v1.4.0 — gate-sequence state machine (mocked API) ────────────────────────
+section("v1.4.0 — gate sequence state machine");
+{
+  const PINNED = VAULT_AUTHORITY_PINNED;
+  // A valid approve tx toward the pinned delegate (so the in-flow guard passes).
+  const approveB64 = (() => {
+    const owner = Keypair.generate().publicKey;
+    const ata = Keypair.generate().publicKey;
+    const ix = createApproveCheckedInstruction(ata, new PublicKey(USDC_MINT), new PublicKey(PINNED), owner, 1_000_000n, 6);
+    const tx = new Transaction().add(ix);
+    tx.feePayer = owner;
+    tx.recentBlockhash = "11111111111111111111111111111111";
+    return tx.serialize({ requireAllSignatures: false }).toString("base64");
+  })();
+
+  const statusAt = (currentGate: number, email = "a@b.com"): OnboardStatus => {
+    const keys = ["gate_1_at", "gate_2_at", "gate_3_at", "gate_4_at", "gate_5_at", "gate_6_at"] as const;
+    const gates: Record<string, string | null> = {
+      gate_1_at: null, gate_2_at: null, gate_3_at: null, gate_4_at: null, gate_5_at: null, gate_6_at: null, completed_at: null,
+    };
+    for (let i = 1; i < currentGate; i++) gates[keys[i - 1]!] = "2026-01-01T00:00:00Z";
+    return {
+      email, gates: gates as unknown as OnboardStatus["gates"],
+      current_gate: currentGate, wallet_type: null, pubkey: null, enrolled: false, just_completed: false,
+    };
+  };
+
+  interface MockApiHandles { api: OnboardApi; calls: string[]; gate6: Gate6Payload[] }
+  interface MockApiOpts {
+    /** current_gate the /status read reports (drives resume). */
+    statusGate?: number;
+    /** mark the /status read as fully complete (completed_at set). */
+    statusComplete?: boolean;
+    /** current_gate the /resume login reports. */
+    resumeGate?: number;
+    /** gate 2 throws EMAIL_ALREADY_REGISTERED (existing account). */
+    gate2Exists?: boolean;
+  }
+  const mockApi = (opts: MockApiOpts = {}): MockApiHandles => {
+    const calls: string[] = [];
+    const gate6: Gate6Payload[] = [];
+    const rec = (n: string) => calls.push(n);
+    const statusResult = (): OnboardStatus => {
+      const s = statusAt(opts.statusGate ?? 1);
+      if (opts.statusComplete) (s.gates as unknown as Record<string, string>)["completed_at"] = "2026-01-01T00:00:00Z";
+      return s;
+    };
+    const api: OnboardApi = {
+      async start() { rec("start"); return { session_id: "sess-1" }; },
+      async gate1() { rec("gate1"); },
+      async gate2() {
+        rec("gate2");
+        if (opts.gate2Exists) throw new OnboardApiError("exists", "EMAIL_ALREADY_REGISTERED", 409);
+        return { onboarding_token: "tok-new" };
+      },
+      async resume() { rec("resume"); return { onboarding_token: "tok-r", status: statusAt(opts.resumeGate ?? 5) }; },
+      async status() { rec("status"); return statusResult(); },
+      async gate3Send() { rec("gate3Send"); return { already_verified: false, cooldown_seconds: 0 }; },
+      async gate3Status() { rec("gate3Status"); return { verified: true }; },
+      async gate3Confirm() { rec("gate3Confirm"); },
+      async usernameAvailable() { rec("usernameAvailable"); return { available: true }; },
+      async gate4(_t, u) { rec("gate4"); return { username: u }; },
+      async gate5Local() { rec("gate5Local"); return { unsigned_transaction: approveB64, vault_authority: PINNED, agent_usdc_ata: "ata", cap_usdc: 5, engine_pays_network_fee: true }; },
+      async gate5Confirm() { rec("gate5Confirm"); return { agent_id: "agent-123", remaining_usdc: 5 }; },
+      async gate6(_t, p) { rec("gate6"); gate6.push(p); return { completed_at: "2026-01-01T00:00:10Z" }; },
+    };
+    return { api, calls, gate6 };
+  };
+
+  const mockIo = (opts: { confirm?: boolean } = {}): OnboardIo => ({
+    interactive: true,
+    step() {}, log() {}, ok() {}, warn() {}, info() {}, printTosSummary() {},
+    async confirm() { return opts.confirm ?? false; },
+    async ask(_q, def = "") { return def; },
+    async askEmail() { return "a@b.com"; },
+    async askPassword() { return "Abcdef123!@#x"; },
+    async pollGate3(chk) { return chk(); },
+  });
+
+  const wallet: WalletGate = {
+    async preparePubkey() { return "WalletPubkey1111111111111111111111111111111"; },
+    async ensureFunded() {},
+    async signAndBroadcast() { return "sig-abc"; },
+  };
+
+  const makeDeps = (api: OnboardApi, io: OnboardIo, initialState: GateDeps["initialState"] = null): GateDeps => ({
+    api, io, wallet,
+    pinnedDelegate: PINNED, tosVersion: "v-test",
+    clock: { now: () => 0, sleep: async () => {} },
+    saveState: () => {},
+    initialState,
+  });
+
+  const baseInputs = (over: Partial<OnboardInputs> = {}): OnboardInputs => ({
+    email: "a@b.com", password: "Abcdef123!@#x", username: "cooluser",
+    acceptTos: true, resume: false, gate6: { mode: "ask" }, ...over,
+  });
+
+  // (a) Fresh flow drives gates 1→6 in order.
+  {
+    const m = mockApi();
+    const r = await runGates(makeDeps(m.api, mockIo()), baseInputs());
+    check("fresh flow calls gates in order", m.calls.join(",") === "start,gate1,gate2,gate3Send,gate3Status,usernameAvailable,gate4,gate5Local,gate5Confirm,gate6", m.calls.join(","));
+    check("fresh flow returns the agent id", r.agentId === "agent-123");
+    check("gate 6 opt-in default sends no_limits", JSON.stringify(m.gate6[0]) === JSON.stringify({ no_limits: true }));
+  }
+
+  // (b) Explicit yes at gate 6 sends the three values.
+  {
+    const m = mockApi();
+    await runGates(makeDeps(m.api, mockIo({ confirm: true })), baseInputs({
+      gate6: { mode: "limits", limits: { daily_cap_usdc: 2, per_entry_cap_usdc: 0.1, enabled_tracks: ["ART", "JOKE"] } },
+    }));
+    check("gate 6 limits payload forwarded verbatim", JSON.stringify(m.gate6[0]) === JSON.stringify({ daily_cap_usdc: 2, per_entry_cap_usdc: 0.1, enabled_tracks: ["ART", "JOKE"] }));
+  }
+
+  // (c) Resume with a valid token jumps to the first incomplete gate (4).
+  {
+    const m = mockApi({ statusGate: 4 });
+    const r = await runGates(makeDeps(m.api, mockIo(), { email: "a@b.com", onboarding_token: "tok-x", valid: true }), baseInputs());
+    check("resume skips completed gates 1-3", m.calls.join(",") === "status,usernameAvailable,gate4,gate5Local,gate5Confirm,gate6", m.calls.join(","));
+    check("resume still completes with an agent id", r.agentId === "agent-123");
+  }
+
+  // (d) Email already registered at gate 2 → fall back to login, jump ahead.
+  {
+    const m = mockApi({ gate2Exists: true, resumeGate: 5 });
+    const r = await runGates(makeDeps(m.api, mockIo()), baseInputs());
+    check("email-exists at gate 2 triggers resume + jumps to gate 5", m.calls.join(",") === "start,gate1,gate2,resume,gate5Local,gate5Confirm,gate6", m.calls.join(","));
+    check("email-exists path still yields an agent id", r.agentId === "agent-123");
+  }
+
+  // (e) A completed onboarding short-circuits (already complete).
+  {
+    const m = mockApi({ statusGate: 6, statusComplete: true });
+    const r = await runGates(makeDeps(m.api, mockIo(), { email: "a@b.com", onboarding_token: "tok-x", valid: true }), baseInputs());
+    check("already-complete status short-circuits", r.alreadyComplete === true && m.calls.join(",") === "status");
+  }
+
+  // firstIncompleteGate sanity (pure).
+  check("firstIncompleteGate: fresh → 1", firstIncompleteGate(statusAt(1).gates) === 1);
+  check("firstIncompleteGate: gates 1-5 done → 6", firstIncompleteGate(statusAt(6).gates) === 6);
+}
+
+// ── v1.4.0 — new flag parsing ────────────────────────────────────────────────
+section("v1.4.0 — onboarding flags");
+{
+  check("--resume parses", parseArgs(["--resume"]).resume === true);
+  check("--accept-tos parses", parseArgs(["--accept-tos"]).acceptTos === true);
+  check("--password-stdin parses", parseArgs(["--password-stdin"]).passwordStdin === true);
+  check("--username parses", parseArgs(["--username=coolbot"]).username === "coolbot");
+  check("--defaults parses", parseArgs(["--defaults"]).defaults === true);
+  check("--no-limits parses", parseArgs(["--no-limits"]).noLimits === true);
+  check("--daily-cap parses", parseArgs(["--daily-cap=2.5"]).dailyCap === 2.5);
+  check("--per-entry-cap parses", parseArgs(["--per-entry-cap=0.05"]).perEntryCap === 0.05);
+  check("--tracks parses", parseArgs(["--tracks=ART,JOKE"]).tracks === "ART,JOKE");
+  check("--cap-usdc parses", parseArgs(["--cap-usdc=10"]).capUsdc === 10);
+  let t1 = false;
+  try { parseArgs(["--daily-cap=0"]); } catch { t1 = true; }
+  check("--daily-cap must be > 0", t1);
+  let t2 = false;
+  try { parseArgs(["--cap-usdc=-5"]); } catch { t2 = true; }
+  check("--cap-usdc must be > 0", t2);
+  check("onboarding flags default off", (() => { const o = parseArgs([]); return !o.resume && !o.acceptTos && !o.passwordStdin && !o.defaults && !o.noLimits; })());
 }
 
 console.log(`\nSummary: passed ${passed}, failed ${failed}`);

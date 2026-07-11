@@ -7,7 +7,7 @@
  */
 import { existsSync, rmSync, readFileSync } from "node:fs";
 import { createInterface } from "node:readline/promises";
-import { Connection, Keypair, PublicKey } from "@solana/web3.js";
+import { Connection, Keypair } from "@solana/web3.js";
 import { parseArgs, HELP_TEXT, type Options, type SurfaceId } from "./flags.js";
 import { banner, box, step, ok, warn, info, arrow, c } from "./ui.js";
 import { omniologyDir, keypairPath, agentPath, type AgentRecord } from "./paths.js";
@@ -16,22 +16,19 @@ import { detectSurfaces } from "./surfaces/detect.js";
 import { installSurface } from "./surfaces/index.js";
 import { defaultExec } from "./surfaces/exec.js";
 import { currentPlatform, cursorConfigPath, findClineConfigPath } from "./hosts.js";
-import type { InstallResult } from "./surfaces/types.js";
-import { generateKeypair, loadKeypair, saveKeypair, printAddressQr } from "./wallet.js";
-import { pollUntilFunded, getBalances } from "./funding.js";
+import { loadKeypair, saveKeypair } from "./wallet.js";
+import { getBalances } from "./funding.js";
 import { inspectExistingWallet, backupOmniologyDir, decideOverwrite } from "./safety.js";
-import { registerAgent } from "./register.js";
 import { withdraw } from "./withdraw.js";
-import { generateDisplayName } from "./names.js";
 import {
   DASHBOARD_URL,
-  TERMS_URL,
-  SUGGESTED_USDC,
-  FUNDING_POLL_MS,
-  FUNDING_TIMEOUT_MS,
+  DEFAULT_DAILY_CAP_USDC,
+  DEFAULT_PER_ENTRY_CAP_USDC,
+  ALL_TRACKS,
 } from "./constants.js";
+import { runOnboarding, completionBox, type Gate6Choice } from "./onboarding/flow.js";
+import { readStdin } from "./onboarding/prompts.js";
 
-const TOTAL_STEPS = 5;
 const interactive = Boolean(process.stdin.isTTY && process.stdout.isTTY);
 
 async function ask(question: string, def = ""): Promise<string> {
@@ -72,27 +69,9 @@ async function confirmDestructive(opts: Options, message: string): Promise<boole
   return ans.trim().toLowerCase() === "yes";
 }
 
-/** Prominent SEND-USDC-(SOL-optional) banner shown above the funding QR. */
-function printSolWarning(): void {
-  const band = "══════════════════════════════════════════════════════";
-  console.log("");
-  console.log("  " + c.yellow(band));
-  console.log("  " + c.bold(c.yellow("⚠️  IMPORTANT: SEND ")) + c.bold(c.green("USDC")) + c.bold(c.yellow(" TO COMPETE")));
-  console.log("  " + c.yellow(band));
-  console.log("  Your agent uses " + c.green("USDC") + " for contest entries — Omniology");
-  console.log("  pays the Solana network fees while competing.");
-  console.log("");
-  console.log("  " + c.bold("OPTIONAL:") + " If you plan to later withdraw winnings to a");
-  console.log("  personal wallet, send ~0.005 SOL too so your agent");
-  console.log("  can pay the withdraw transaction fee. (Skip this if");
-  console.log("  you'd rather keep winnings in your agent wallet for");
-  console.log("  continued competing — no SOL needed for entries.)");
-  console.log("  " + c.yellow(band));
-}
-
-// ── Step 1: where do you want to run your agent? ─────────────────────────────
+// ── Step 0: where do you want to run your agent? ─────────────────────────────
 async function resolveSurface(opts: Options): Promise<SurfaceId> {
-  step(1, TOTAL_STEPS, "Where do you want to run your agent?");
+  step(0, 6, "Where do you want to run your agent?");
   if (opts.host) {
     ok(`Using ${opts.host} (from --surface)`);
     return opts.host;
@@ -145,157 +124,6 @@ async function guardOverwrite(opts: Options, path: string, newAddress?: string):
     }
     if (bak) info(`Backed up previous setup → ${bak}`);
   }
-}
-
-// ── Step 2: wallet ───────────────────────────────────────────────────────────
-async function resolveWallet(opts: Options, importedKp?: Keypair): Promise<Keypair> {
-  step(2, TOTAL_STEPS, "Setting up your agent wallet…");
-  const path = keypairPath();
-
-  if (importedKp) {
-    await guardOverwrite(opts, path, importedKp.publicKey.toBase58());
-    saveKeypair(path, importedKp);
-    ok(`Imported wallet ${importedKp.publicKey.toBase58().slice(0, 8)}… → ${path}`);
-    return importedKp;
-  }
-
-  if (existsSync(path)) {
-    const existing = loadKeypair(path);
-    const choice = await ask(
-      `A wallet already exists (${existing.publicKey.toBase58().slice(0, 8)}…). Use it or make a new one? [existing/fresh, default existing]: `,
-      "existing",
-    );
-    if (choice.toLowerCase().startsWith("f")) {
-      await guardOverwrite(opts, path); // generating a new key clobbers the existing one
-      const kp = generateKeypair();
-      saveKeypair(path, kp);
-      ok(`New wallet created → ${path}`);
-      return kp;
-    }
-    ok(`Using existing wallet ${existing.publicKey.toBase58().slice(0, 8)}…`);
-    return existing;
-  }
-
-  const kp = generateKeypair();
-  saveKeypair(path, kp);
-  ok(`New wallet created → ${path}${process.platform !== "win32" ? " (private, chmod 600)" : ""}`);
-  return kp;
-}
-
-// ── Step 3: funding ───────────────────────────────────────────────────────────
-async function fundWallet(opts: Options, kp: Keypair): Promise<void> {
-  step(3, TOTAL_STEPS, "Fund your wallet (the only thing you need to do)");
-  const address = kp.publicKey.toBase58();
-  printSolWarning();
-  console.log("");
-  console.log("  Send USDC (Solana) to this address:");
-  console.log("");
-  console.log("    " + c.bold(c.green(address)));
-  console.log("");
-  await printAddressQr(address);
-  console.log(
-    `  Suggested first deposit: ${c.bold(c.green(`${SUGGESTED_USDC} USDC`))} (a few contest entries).`,
-  );
-
-  if (opts.skipFunding) {
-    warn("Skipping the funding check (--skip-funding). Fund the wallet before your agent enters contests.");
-    return;
-  }
-
-  console.log("");
-  info(`Waiting for funds… (checking every ${FUNDING_POLL_MS / 1000}s, Ctrl+C to stop)`);
-  const connection = new Connection(opts.rpcUrl, "confirmed");
-  let lastLine = "";
-  const result = await pollUntilFunded(connection, new PublicKey(address), {
-    minSol: opts.minSol,
-    minUsdc: opts.minUsdc,
-    pollMs: FUNDING_POLL_MS,
-    timeoutMs: FUNDING_TIMEOUT_MS,
-    onTick: (b) => {
-      const line = `  …balance so far: ${b.usdc.toFixed(2)} USDC${opts.minSol > 0 ? ` / ${b.sol.toFixed(4)} SOL` : ""}`;
-      if (line !== lastLine) { console.log(line); lastLine = line; }
-    },
-  });
-  if (!result.funded) {
-    fail(
-      `Didn't see the funds within ${Math.round(FUNDING_TIMEOUT_MS / 60000)} minutes. ` +
-        "No problem — fund the wallet whenever you like, then re-run this command (it'll pick up where you left off).",
-    );
-  }
-  ok(`Detected ${result.balances.usdc.toFixed(2)} USDC. Ready.`);
-}
-
-// ── Step 4: register ───────────────────────────────────────────────────────────
-async function register(opts: Options, kp: Keypair): Promise<AgentRecord> {
-  step(4, TOTAL_STEPS, "Registering your agent with Omniology…");
-
-  if (existsSync(agentPath())) {
-    try {
-      const rec = JSON.parse(readFileSync(agentPath(), "utf8")) as AgentRecord;
-      if (rec.agent_id && rec.wallet_address === kp.publicKey.toBase58()) {
-        ok(`Already registered — agent ${rec.agent_id.slice(0, 8)}…`);
-        return rec;
-      }
-    } catch {
-      /* re-register */
-    }
-  }
-
-  let email = opts.email;
-  if (!email) {
-    email = await ask("Email for winnings + tax (1099) notices (required): ");
-    while (interactive && (!email || !isEmail(email))) {
-      email = await ask("  Please enter a valid email address: ");
-    }
-  }
-  if (!email || !isEmail(email)) {
-    fail("A valid email is required to register (Omniology sends payout + tax notices there). Re-run with --email=you@example.com.");
-  }
-
-  // Display name: flag → prompt (press ENTER to auto-generate) → auto-gen fallback.
-  let displayName = opts.displayName;
-  if (!displayName) {
-    const suggested = generateDisplayName();
-    const answer = await ask(
-      `What should we call your agent? (e.g. 'duck-joker-9000'). Press ENTER for "${suggested}": `,
-      suggested,
-    );
-    displayName = answer || suggested;
-  }
-  ok(`Agent name: ${displayName}`);
-
-  info(`By continuing you accept the Terms of Service at ${TERMS_URL}.`);
-  let res;
-  try {
-    res = await registerAgent(kp, { email, displayName });
-  } catch (err) {
-    fail(err instanceof Error ? err.message : String(err), err, opts.debug);
-  }
-
-  const record: AgentRecord = {
-    agent_id: res.agent_id,
-    wallet_address: kp.publicKey.toBase58(),
-    email,
-    display_name: displayName,
-    registered_at: new Date().toISOString(),
-    network: "mainnet",
-  };
-  writeConfigAtomic(agentPath(), record as unknown as Record<string, unknown>);
-  ok(`Registered! Agent ID ${res.agent_id.slice(0, 8)}… (saved to ${agentPath()})`);
-  if (res.email_verification_sent) ok(`Verification email sent to ${email} — click the link when you can.`);
-  return record;
-}
-
-function successBox(result: InstallResult): void {
-  const lines: string[] = [c.bold(c.green("✓ Setup complete!")), ""];
-  lines.push(result.openHint);
-  lines.push("");
-  lines.push("Then tell your agent:");
-  lines.push(c.cyan('  "Compete in Omniology contests for me —'));
-  lines.push(c.cyan('   keep playing until I tell you to stop."'));
-  lines.push("");
-  lines.push(c.dim(`Watch live: ${DASHBOARD_URL}`));
-  box(lines);
 }
 
 // ── Withdraw mode (--withdraw) ────────────────────────────────────────────────
@@ -454,6 +282,123 @@ async function performReset(opts: Options): Promise<void> {
   ok(`Reset: removed ${dir}`);
 }
 
+// ── Gated onboarding (v1.4.0) helpers ─────────────────────────────────────────
+
+/** Resolve the enabled-tracks list from --tracks ("all" or a CSV). */
+function resolveTracks(raw?: string): string[] {
+  if (!raw || raw.toLowerCase() === "all") return [...ALL_TRACKS];
+  const picked = raw
+    .split(",")
+    .map((s) => s.trim().toUpperCase())
+    .filter((s) => (ALL_TRACKS as readonly string[]).includes(s));
+  return picked.length ? picked : [...ALL_TRACKS];
+}
+
+/** Map the gate-6 flags to a choice. Gate 6 is OPT-IN: no flags → prompt (ask). */
+function resolveGate6(opts: Options): Gate6Choice {
+  if (opts.defaults || opts.noLimits) return { mode: "no_limits" };
+  if (opts.dailyCap !== undefined || opts.perEntryCap !== undefined || opts.tracks !== undefined) {
+    return {
+      mode: "limits",
+      limits: {
+        daily_cap_usdc: opts.dailyCap ?? DEFAULT_DAILY_CAP_USDC,
+        per_entry_cap_usdc: opts.perEntryCap ?? DEFAULT_PER_ENTRY_CAP_USDC,
+        enabled_tracks: resolveTracks(opts.tracks),
+      },
+    };
+  }
+  return { mode: "ask" };
+}
+
+/** An existing, completed setup = a saved keypair + a registered agent.json. */
+function detectExistingSetup(): AgentRecord | null {
+  if (!existsSync(keypairPath()) || !existsSync(agentPath())) return null;
+  try {
+    const rec = JSON.parse(readFileSync(agentPath(), "utf8")) as AgentRecord;
+    return rec.agent_id ? rec : null;
+  } catch {
+    return null;
+  }
+}
+
+/** Save an --import keypair (funded-wallet-guarded) so gate 5 signs with it. */
+async function importKeypair(opts: Options, kp: Keypair): Promise<void> {
+  const path = keypairPath();
+  await guardOverwrite(opts, path, kp.publicKey.toBase58());
+  saveKeypair(path, kp);
+  ok(`Imported wallet ${kp.publicKey.toBase58().slice(0, 8)}… → ${path}`);
+}
+
+/** Persist ~/.omniology/agent.json so --whoami / --reconfigure keep working. */
+function writeAgentJson(agentId: string, walletAddress: string | undefined, email: string): void {
+  const wallet =
+    walletAddress ?? (existsSync(keypairPath()) ? loadKeypair(keypairPath()).publicKey.toBase58() : "");
+  const record: AgentRecord = {
+    agent_id: agentId,
+    wallet_address: wallet,
+    email: email || undefined,
+    registered_at: new Date().toISOString(),
+    network: "mainnet",
+  };
+  writeConfigAtomic(agentPath(), record as unknown as Record<string, unknown>);
+}
+
+/** The default flow: run gates 1–6, then connect the MCP host. */
+async function runSetup(opts: Options, importedKp?: Keypair): Promise<void> {
+  const surface = await resolveSurface(opts);
+
+  // Importing a key? Save it first (guarded) so gate 5 signs with it.
+  if (importedKp) await importKeypair(opts, importedKp);
+
+  // Existing, completed setup → keep working untouched: skip the gates and just
+  // (re)connect the host. --resume forces the gate flow instead.
+  const existingAgent = detectExistingSetup();
+  if (existingAgent && !opts.resume) {
+    info("Existing agent detected — skipping onboarding (use --reset to start over, or --reconfigure to update the host).");
+    const result = await installSurface(surface, { keypairPath: keypairPath(), agentId: existingAgent.agent_id, opts });
+    completionBox(DASHBOARD_URL, result.openHint);
+    return;
+  }
+
+  // Gate-2 password from stdin (scripted runs never pass it on the command line).
+  let password: string | undefined;
+  if (opts.passwordStdin) {
+    password = await readStdin();
+    if (!password) fail("--password-stdin was set but no password was received on stdin.");
+  }
+
+  let gateResult;
+  try {
+    gateResult = await runOnboarding({
+      email: opts.email,
+      password,
+      username: opts.username ?? opts.displayName,
+      acceptTos: opts.acceptTos,
+      resume: opts.resume,
+      capUsdc: opts.capUsdc,
+      gate6: resolveGate6(opts),
+      rpcUrl: opts.rpcUrl,
+      skipFunding: opts.skipFunding,
+      minSol: opts.minSol,
+      minUsdc: opts.minUsdc,
+    });
+  } catch (err) {
+    fail(err instanceof Error ? err.message : String(err), err, opts.debug);
+  }
+
+  const agentId = gateResult.agentId ?? detectExistingSetup()?.agent_id;
+  if (!agentId) {
+    fail(
+      "Onboarding isn't finished yet (no agent connected). If your Balance isn't funded, fund it and re-run with --resume.",
+    );
+  }
+  writeAgentJson(agentId, gateResult.walletAddress, gateResult.email);
+
+  info("Connecting Omniology to your AI host…");
+  const result = await installSurface(surface, { keypairPath: keypairPath(), agentId, opts });
+  completionBox(DASHBOARD_URL, result.openHint);
+}
+
 async function main(): Promise<void> {
   const opts = parseArgs(process.argv.slice(2));
   if (opts.help) {
@@ -502,19 +447,7 @@ async function main(): Promise<void> {
     await performReset(opts);
   }
 
-  const surface = await resolveSurface(opts);
-  const kp = await resolveWallet(opts, importedKp);
-  await fundWallet(opts, kp);
-  const agent = await register(opts, kp);
-
-  step(5, TOTAL_STEPS, "Connecting Omniology to your agent…");
-  const result = await installSurface(surface, {
-    keypairPath: keypairPath(),
-    agentId: agent.agent_id,
-    opts,
-  });
-
-  successBox(result);
+  await runSetup(opts, importedKp);
 }
 
 main().catch((err) => {
