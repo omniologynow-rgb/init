@@ -1,5 +1,49 @@
 # Changelog
 
+## 1.4.0 — gated onboarding (the 6-gate wizard, in your terminal)
+
+The CLI is now the terminal surface of the SAME unified onboarding state machine
+the web wizard and the ChatGPT Custom GPT drive — same six gates, same order,
+same `/api/onboard/*` endpoints (engine migration 037). Setup walks through:
+
+1. **Terms of Service** — a plain-English summary + full-text link, then an
+   explicit accept. `--accept-tos` accepts non-interactively (required in CI).
+2. **Account** — email + a password (min 12 chars, upper/lower/number/symbol),
+   entered hidden and confirmed. `--email=` and `--password-stdin` for scripts
+   (the password is read from stdin, never from argv). An email that already has
+   an account transparently logs in and continues where it left off.
+3. **Email verification** — sends a code + magic link, then polls with a friendly
+   countdown (up to 15 min) and auto-continues the moment you click the link.
+4. **Username** — real-time availability check with alternate suggestions on a
+   collision. `--username=` to skip the prompt.
+5. **Connect your Balance** — the default local-keypair path: generate/reuse your
+   wallet, fund it once, then approve a **revocable** spending delegation. The
+   engine-supplied approve transaction is **decoded and its delegate is verified
+   against the pinned vault authority BEFORE the local key ever signs** — a
+   fail-closed guard mirroring the website. The private key never leaves your
+   machine; the engine only fee-pays.
+6. **Spending limits — OPT-IN.** The default is **no limits**: you're asked
+   "Set spending limits for your agent? [y/N]" and declining (or `--defaults` /
+   `--no-limits`) sets none. Say yes to set a daily cap, per-entry cap, and which
+   tracks are enabled (`--daily-cap` / `--per-entry-cap` / `--tracks` for scripts).
+
+After the gates it wires up your AI host (Claude Code / Cursor / Cline) exactly as
+before and prints your quick-start commands.
+
+- **`--resume`** fetches `/api/onboard/status` and jumps to the first unfinished
+  gate. Onboarding progress (email + short-lived onboarding token, never the
+  password) is saved to `~/.omniology/onboarding.json` so an interrupted setup
+  picks up cleanly.
+- **No breaking changes.** Every existing command/flag still works. An existing
+  keypair + registered `agent.json` is detected and **skips the gates** — it just
+  (re)connects the host. `--withdraw`, `--reconfigure`, `--whoami`, `--reset`,
+  `--import`, and the funded-wallet safety guards are unchanged.
+- **New flags:** `--resume`, `--accept-tos`, `--password-stdin`, `--username`,
+  `--cap-usdc`, `--defaults`, `--no-limits`, `--daily-cap`, `--per-entry-cap`,
+  `--tracks`.
+- **Non-TTY/CI:** gates that need input fail with a clear message naming the flag
+  to provide (`--email`, `--password-stdin`, `--username`, `--accept-tos`).
+
 ## 1.3.0 — wallet-safety bundle (P0: no more permanent fund loss)
 
 Three post-launch incidents where setup destroyed real money. All three are now
