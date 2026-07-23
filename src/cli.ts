@@ -5,9 +5,9 @@
  * once (the only human action) → register → route the MCP install for that
  * surface → verify → print the exact prompt to paste. Plain English throughout.
  */
-import { existsSync, rmSync, readFileSync } from "node:fs";
+import { existsSync, rmSync, readFileSync, copyFileSync, mkdirSync, chmodSync } from "node:fs";
 import { createInterface } from "node:readline/promises";
-import { Connection, Keypair } from "@solana/web3.js";
+import { Connection, Keypair, PublicKey } from "@solana/web3.js";
 import { parseArgs, HELP_TEXT, type Options, type SurfaceId } from "./flags.js";
 import { banner, box, step, ok, warn, info, arrow, c } from "./ui.js";
 import { omniologyDir, keypairPath, agentPath, type AgentRecord } from "./paths.js";
@@ -32,6 +32,7 @@ import {
 } from "./constants.js";
 import { runOnboarding, completionBox, type Gate6Choice } from "./onboarding/flow.js";
 import { readStdin } from "./onboarding/prompts.js";
+import { discoverAgents, type DiscoveredAgent } from "./agents.js";
 
 const interactive = Boolean(process.stdin.isTTY && process.stdout.isTTY);
 
@@ -147,14 +148,14 @@ async function guardOverwrite(opts: Options, path: string, newAddress?: string):
 
 // ── Withdraw mode (--withdraw) ────────────────────────────────────────────────
 async function runWithdraw(opts: Options): Promise<void> {
-  step(1, 1, "Withdraw USDC from your agent wallet");
+  step(1, 1, "Withdraw USDC from your Balance");
   const path = keypairPath();
   if (!existsSync(path)) {
-    fail(`No agent wallet found at ${path}. Run \`npx omniology-init\` first (or pass --import).`);
+    fail(`No agent found at ${path}. Run \`npx omniology-init\` first (or pass --import).`);
   }
   const kp = loadKeypair(path);
   const connection = new Connection(opts.rpcUrl, "confirmed");
-  info(`From wallet: ${kp.publicKey.toBase58()}`);
+  info(`From: ${kp.publicKey.toBase58()}`);
   info(opts.amount !== undefined ? `Amount: ${opts.amount} USDC` : "Amount: full USDC balance");
   info(`To: ${opts.to}`);
   let res;
@@ -237,7 +238,7 @@ async function runWhoami(opts: Options): Promise<void> {
   step(1, 1, "Your Omniology agent");
   const path = keypairPath();
   if (!existsSync(path)) {
-    info("No agent wallet found. Run `npx omniology-init` to set one up.");
+    info("No agent found. Run `npx omniology-init` to set one up.");
     return;
   }
   const kp = loadKeypair(path);
@@ -258,11 +259,11 @@ async function runWhoami(opts: Options): Promise<void> {
   box([
     c.bold("Active Omniology agent"),
     "",
-    `Name:     ${displayName}`,
-    `Agent ID: ${agentId}`,
-    `Wallet:   ${address}`,
-    `Balance:  ${c.green(b.usdc.toFixed(2) + " USDC")} / ${b.sol.toFixed(4)} SOL`,
-    c.dim(`Keypair:  ${path}`),
+    `Agent:      ${displayName}`,
+    `Connect ID: ${agentId}`,
+    `Address:    ${address}`,
+    `Balance:    ${c.green(b.usdc.toFixed(2) + " USDC")} / ${b.sol.toFixed(4)} SOL`,
+    c.dim(`Keypair:    ${path}`),
   ]);
 }
 
@@ -277,7 +278,7 @@ async function performReset(opts: Options): Promise<void> {
   if (existing?.hasFunds) {
     const proceed = await confirmDestructive(
       opts,
-      c.yellow("⚠️  This wallet still holds funds:") +
+      c.yellow("⚠️  This agent's Balance still holds funds:") +
         `\n  ${existing.address}\n` +
         `  ${existing.balances.usdc.toFixed(2)} USDC / ${existing.balances.sol.toFixed(4)} SOL\n` +
         c.bold("--reset erases its private key. Those funds become unrecoverable."),
@@ -285,12 +286,12 @@ async function performReset(opts: Options): Promise<void> {
     if (!proceed) {
       if (!interactive) {
         fail(
-          "Refusing to --reset a funded wallet without confirmation. " +
+          "Refusing to --reset a funded agent without confirmation. " +
             "Re-run with --yes to proceed, or move the funds out first with " +
             "`npx omniology-init --withdraw --to=<your_address>`.",
         );
       }
-      info("Reset cancelled — your wallet is untouched.");
+      info("Reset cancelled — your agent is untouched.");
       process.exit(0);
     }
   }
@@ -361,6 +362,104 @@ function writeAgentJson(agentId: string, walletAddress: string | undefined, emai
   writeConfigAtomic(agentPath(), record as unknown as Record<string, unknown>);
 }
 
+// ── Device-agent picker (P4) ──────────────────────────────────────────────────
+
+/** Best-effort live Balance for one agent (USDC). Returns null on any error. */
+async function agentBalance(a: DiscoveredAgent, rpcUrl: string): Promise<number | null> {
+  if (!a.walletAddress) return null;
+  try {
+    const b = await getBalances(new Connection(rpcUrl, "confirmed"), new PublicKey(a.walletAddress));
+    return b.usdc;
+  } catch {
+    return null;
+  }
+}
+
+/** `[Agent name — Connect ID abcd1234… — 1.50 USDC]` (Balance omitted if unknown). */
+function formatAgentLine(a: DiscoveredAgent, balance: number | null): string {
+  const bal = balance === null ? "Balance unknown" : `${balance.toFixed(2)} USDC`;
+  const tag = a.source === "archived" ? c.dim(" (archived)") : "";
+  return `${c.bold(a.name)} — Connect ID ${a.agentId.slice(0, 8)}… — ${c.green(bal)}${tag}`;
+}
+
+/**
+ * Make `a` the active agent and connect the host. If it's an archived copy,
+ * restore it into the live slot first — backing up the current active slot
+ * (never deletes a key; the current agent stays recoverable in ~/.omniology.bak).
+ */
+async function runAsAgent(opts: Options, surface: SurfaceId, a: DiscoveredAgent): Promise<void> {
+  if (a.source === "archived") {
+    // Preserve whatever is currently active before we overwrite the slot.
+    const bak = backupOmniologyDir();
+    if (bak) info(`Backed up the current active setup → ${bak}`);
+    mkdirSync(omniologyDir(), { recursive: true });
+    copyFileSync(a.keypairPath, keypairPath());
+    copyFileSync(a.agentJsonPath, agentPath());
+    if (process.platform !== "win32") {
+      try { chmodSync(keypairPath(), 0o600); } catch { /* best effort */ }
+    }
+    ok(`Restored "${a.name}" (Connect ID ${a.agentId.slice(0, 8)}…) into your active slot.`);
+  } else {
+    ok(`Running as "${a.name}" (Connect ID ${a.agentId.slice(0, 8)}…).`);
+  }
+
+  const launch = resolveHostLaunch();
+  const ctx = { keypairPath: keypairPath(), agentId: a.agentId, opts, launch };
+  const result = await installSurface(surface, ctx);
+  const setupPath = writeSetupDoc(ctx);
+  info(`Universal setup (any host): ${setupPath}`);
+  completionBox(DASHBOARD_URL, result.openHint);
+}
+
+/**
+ * If this device has registered agents, present them as an explicit picker and
+ * run-as the chosen one. Returns true when an existing agent was run (caller
+ * should stop); false to fall through to creating a new agent.
+ *  - --agent=<id>: select non-interactively (no prompt).
+ *  - non-interactive with no --agent: does NOT guess — returns false so the
+ *    caller can create a new agent (or the operator re-runs with --agent/--new).
+ */
+async function pickExistingAgent(opts: Options, surface: SurfaceId): Promise<boolean> {
+  const agents = discoverAgents();
+  if (agents.length === 0) return false; // nothing to pick — create new
+
+  // Non-interactive select by Connect ID.
+  if (opts.agent) {
+    const match = agents.find((a) => a.agentId === opts.agent || a.agentId.startsWith(opts.agent!));
+    if (!match) {
+      fail(
+        `No agent on this device matches --agent=${opts.agent}. Known Connect IDs:\n` +
+          agents.map((a) => `    ${a.agentId}  (${a.name})`).join("\n"),
+      );
+    }
+    await runAsAgent(opts, surface, match);
+    return true;
+  }
+
+  // Show the picker (with live Balances).
+  step(0, 6, "This device already has Omniology agents — pick one, or create a new one");
+  const balances = await Promise.all(agents.map((a) => agentBalance(a, opts.rpcUrl)));
+  agents.forEach((a, i) => arrow(`${i + 1}. ${formatAgentLine(a, balances[i]!)}`));
+  arrow(`${agents.length + 1}. ${c.bold("Create a new agent")}`);
+
+  if (!interactive) {
+    // Never silently pick or spawn: without a TTY and without --agent/--new, we
+    // stop and tell the operator exactly how to choose.
+    info("Non-interactive run: not guessing which agent to use.");
+    info(`Re-run with --agent=<Connect ID> to run as one, or --new to create a fresh agent.`);
+    fail("No agent selected. Pass --agent=<id> or --new.");
+  }
+
+  const pick = await ask(`Pick a number [default ${agents.length + 1} = create new]: `, String(agents.length + 1));
+  const idx = Math.min(Math.max(parseInt(pick, 10) || agents.length + 1, 1), agents.length + 1) - 1;
+  if (idx === agents.length) {
+    info("Creating a new agent.");
+    return false; // fall through to onboarding
+  }
+  await runAsAgent(opts, surface, agents[idx]!);
+  return true;
+}
+
 /** The default flow: run gates 1–6, then connect the MCP host. */
 async function runSetup(opts: Options, importedKp?: Keypair): Promise<void> {
   const surface = await resolveSurface(opts);
@@ -368,20 +467,13 @@ async function runSetup(opts: Options, importedKp?: Keypair): Promise<void> {
   // Importing a key? Save it first (guarded) so gate 5 signs with it.
   if (importedKp) await importKeypair(opts, importedKp);
 
-  // Existing, completed setup → keep working untouched: skip the gates and just
-  // (re)connect the host. --resume forces the gate flow instead.
-  const existingAgent = detectExistingSetup();
-  if (existingAgent && !opts.resume) {
-    const w = existsSync(keypairPath()) ? loadKeypair(keypairPath()).publicKey.toBase58() : "";
-    info(`Existing agent detected — reusing it (agent ${existingAgent.agent_id.slice(0, 8)}…, wallet ${w.slice(0, 8)}…). No new agent created.`);
-    info("(Use --reset to start over, or --reconfigure to just refresh the host connector.)");
-    const launch = resolveHostLaunch();
-    const ctx = { keypairPath: keypairPath(), agentId: existingAgent.agent_id, opts, launch };
-    const result = await installSurface(surface, ctx);
-    const setupPath = writeSetupDoc(ctx);
-    info(`Universal setup (any host): ${setupPath}`);
-    completionBox(DASHBOARD_URL, result.openHint);
-    return;
+  // Device-agent picker: if this machine already has agents, make every choice
+  // visible (run-as-one vs create-new) instead of silently reusing a slot.
+  // --resume forces the gate flow; --new forces create; --agent picks by id.
+  if (!opts.resume && !opts.newAgent) {
+    const handled = await pickExistingAgent(opts, surface);
+    if (handled) return; // ran as an existing agent
+    // else: fall through to create a brand-new agent below.
   }
 
   // Gate-2 password from stdin (scripted runs never pass it on the command line).

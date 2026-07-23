@@ -11,6 +11,7 @@ import { cursorConfigPath, type PlatformEnv } from "../src/hosts.js";
 import { mcpConfigMerge, mcpConfigUpsert, hasOmniologyServer, readConfig, toPortablePath, globalBinaryInstalled, resolveLaunch, npxLaunch, binaryLaunch } from "../src/config.js";
 import { buildOpenclawAddArgs, openclawAddCommand, install as installOpenclaw } from "../src/surfaces/openclaw.js";
 import { renderSetupDoc } from "../src/setup-doc.js";
+import { discoverAgents, type DiscoverDeps } from "../src/agents.js";
 import { decideReadiness } from "../src/verify.js";
 import { meetsThreshold, pollUntilFunded } from "../src/funding.js";
 import { buildRegisterProof } from "../src/register.js";
@@ -166,6 +167,57 @@ section("universal SETUP.md");
   check("SETUP.md forbids hand-signing", doc.includes("sign anything yourself") || doc.includes("never build or sign"));
   check("SETUP.md reflects the chosen launch (omniology-mcp)", doc.includes("omniology-mcp"));
   check("SETUP.md includes the openclaw CLI path", doc.includes("openclaw mcp add"));
+  check("SETUP.md uses Connect ID vocab (no 'Agent ID' label)", doc.includes("Connect ID") && !doc.includes("Agent ID:"));
+  check("SETUP.md has no user-facing 'wallet' copy", !/wallet/i.test(doc.replace(/no wallet strings/gi, "")));
+}
+
+section("device-agent discovery (P4)");
+{
+  // Fake fs: active slot has agent A; two archived backups (B, and A again).
+  const files: Record<string, string> = {
+    "/home/bro/.omniology/keypair.json": "[1,2,3]",
+    "/home/bro/.omniology/agent.json": JSON.stringify({ agent_id: "A-id", display_name: "Alpha", wallet_address: "AAAwallet" }),
+    "/home/bro/.omniology.bak/2026-07-20/keypair.json": "[4,5,6]",
+    "/home/bro/.omniology.bak/2026-07-20/agent.json": JSON.stringify({ agent_id: "B-id", display_name: "Bravo", wallet_address: "BBBwallet" }),
+    "/home/bro/.omniology.bak/2026-07-19/keypair.json": "[7,8,9]",
+    "/home/bro/.omniology.bak/2026-07-19/agent.json": JSON.stringify({ agent_id: "A-id", display_name: "Alpha (old)", wallet_address: "AAAwallet" }),
+  };
+  const norm = (p: string) => p.replace(/\\/g, "/"); // node:path.join uses \ on Windows
+  const deps: DiscoverDeps = {
+    activeDir: "/home/bro/.omniology",
+    bakRoot: "/home/bro/.omniology.bak",
+    exists: (p) => { const n = norm(p); return n === "/home/bro/.omniology.bak" || n === "/home/bro/.omniology" || n in files; },
+    readJson: (p) => (files[norm(p)] ? JSON.parse(files[norm(p)]!) : null),
+    listDir: (p) => (norm(p) === "/home/bro/.omniology.bak" ? ["2026-07-19", "2026-07-20"] : []),
+  };
+  const found = discoverAgents(deps);
+  check("discovers both distinct agents (deduped by id)", found.length === 2);
+  check("active agent A is present and marked active", found.some((a) => a.agentId === "A-id" && a.source === "active"));
+  check("archived agent B is present and marked archived", found.some((a) => a.agentId === "B-id" && a.source === "archived"));
+  check("active copy wins over archived copy of the same id", found.find((a) => a.agentId === "A-id")!.source === "active");
+  check("carries name + wallet + keypair path", found.find((a) => a.agentId === "B-id")!.name === "Bravo" && found.find((a) => a.agentId === "B-id")!.keypairPath.replace(/\\/g, "/").includes("2026-07-20"));
+
+  // No agents on a clean device.
+  const empty: DiscoverDeps = { ...deps, exists: () => false, readJson: () => null, listDir: () => [] };
+  check("no agents on a clean device", discoverAgents(empty).length === 0);
+
+  // Malformed agent.json (no agent_id) is skipped.
+  const badFiles: Record<string, string> = {
+    "/home/bro/.omniology/keypair.json": "[1]",
+    "/home/bro/.omniology/agent.json": JSON.stringify({ display_name: "no id" }),
+  };
+  const badDeps: DiscoverDeps = {
+    activeDir: "/home/bro/.omniology", bakRoot: "/home/bro/.omniology.bak",
+    exists: (p) => p in badFiles, readJson: (p) => (badFiles[p] ? JSON.parse(badFiles[p]!) : null), listDir: () => [],
+  };
+  check("skips agent.json with no agent_id", discoverAgents(badDeps).length === 0);
+}
+
+section("device-agent flags (P4)");
+{
+  check("--agent parses", parseArgs(["--agent=abc123"]).agent === "abc123");
+  check("--new parses", parseArgs(["--new"]).newAgent === true);
+  check("picker flags default off", (() => { const o = parseArgs([]); return o.agent === undefined && o.newAgent === false; })());
 }
 
 section("--verify readiness (pure decision)");

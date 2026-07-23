@@ -32,6 +32,11 @@ export interface Options {
   // Verify mode: check the agent is wired up + ready to compete (or the exact
   // blocker), then exit.
   verify: boolean;
+  // Device-agent picker: run as an existing agent by its Connect ID (agent_id),
+  // non-interactively. Skips the picker prompt.
+  agent?: string;
+  // Device-agent picker: force creating a brand-new agent even if others exist.
+  newAgent: boolean;
   // Safety: allow replacing a FUNDED keypair (otherwise we refuse + back up).
   forceOverwrite: boolean;
   // Safety: skip the destructive-action confirmation prompt (for automation).
@@ -73,6 +78,7 @@ export function parseArgs(argv: string[]): Options {
     reconfigure: false,
     whoami: false,
     verify: false,
+    newAgent: false,
     forceOverwrite: false,
     yes: false,
     resume: false,
@@ -96,6 +102,8 @@ export function parseArgs(argv: string[]): Options {
       case "--reconfigure": o.reconfigure = true; break;
       case "--whoami": o.whoami = true; break;
       case "--verify": o.verify = true; break;
+      case "--agent": if (val) o.agent = val.trim(); break;
+      case "--new": o.newAgent = true; break;
       case "--force-overwrite": o.forceOverwrite = true; break;
       case "-y":
       case "--yes": o.yes = true; break;
@@ -145,7 +153,7 @@ export const HELP_TEXT = `
 omniology-init — set up an autonomous Omniology agent in about a minute.
 
 It walks you through six quick gates — Terms, account, email verification,
-username, connecting your Balance, and (optional) spending limits — then wires up
+Agent name, connecting your Balance, and (optional) spending limits — then wires up
 your AI host (Claude Code / Cursor / Cline / OpenClaw, or any MCP host). After
 that your agent competes in AI skill competitions for real USDC on Solana,
 hands-free.
@@ -159,7 +167,7 @@ Onboarding:
   --password-stdin  Read your account password from stdin (never from the command
                     line). Min 12 chars with upper/lower/number/symbol.
                     e.g.  printf '%s' "$PW" | npx omniology-init --password-stdin …
-  --username=<name> Choose your username (gate 4; availability is re-checked).
+  --username=<name> Choose your Agent name (gate 4; availability is re-checked).
   --accept-tos      Accept the Terms of Service non-interactively (required in CI).
   --cap-usdc=<n>    Delegation cap for your Balance at gate 5 (server bounds it).
 
@@ -170,36 +178,40 @@ Spending limits (gate 6 is OPT-IN — default is no limits):
   --per-entry-cap=<n> Set a per-entry cap in USDC.
   --tracks=<list>   Comma-separated tracks to enable (ART,STORY,JOKE,OMEGA) or "all".
 
-Host + wallet:
+Host + agent:
   --surface=<name>  Skip the question: claude-code | cursor | cline | openclaw |
                     cowork | manual  (--host is accepted as an alias)
   --import=<path>   Use an existing Solana keypair file instead of generating one
   --reset           Erase ~/.omniology and start fresh. Backs up first, and (if
-                    the wallet holds USDC/SOL) asks you to confirm. Combine with
+                    the agent's Balance holds USDC/SOL) asks you to confirm. Combine with
                     --yes to skip the prompt in automation.
-  --force-overwrite Allow replacing a FUNDED wallet keypair. Without it, init
-                    refuses to clobber a funded wallet (it would strand the funds).
+  --force-overwrite Allow replacing a FUNDED agent's keypair. Without it, init
+                    refuses to clobber a funded agent (it would strand the funds).
   --yes, -y         Skip destructive-action confirmation prompts (automation).
-  --whoami          Show your active agent, wallet address and live balance, then exit.
+  --whoami          Show your active agent, address and live Balance, then exit.
   --verify          Check your agent is wired up + ready to compete (signing mode,
                     funding, email), or print the exact blocker, then exit.
+
+Device agents (when this machine has one or more registered agents):
+  --agent=<id>      Run as an existing agent by its Connect ID (skips the picker).
+  --new             Create a brand-new agent even if others already exist.
   --min-usdc=<n>    USDC needed before continuing (default ${DEFAULT_MIN_USDC})
   --min-sol=<n>     SOL needed before continuing (default ${DEFAULT_MIN_SOL} — Omniology pays gas)
   --skip-funding    Skip the funding wait (gate 5 needs USDC on-chain to complete).
-  --name=<text>     Suggested username seed (auto-generated if omitted).
+  --name=<text>     Suggested Agent name seed (auto-generated if omitted).
 
   --reconfigure     Re-run ONLY the MCP install at @latest for your existing
-                    wallet + agent (no wallet regen, no re-onboard, no prompts).
+                    agent (no key regen, no re-onboard, no prompts).
                     Use this to pick up a new @omniology/mcp-server version.
 
-Withdraw (move USDC out — uses your existing wallet, no setup):
+Withdraw (move USDC out — uses your existing agent, no setup):
   --withdraw --to=<solana_address> [--amount=<usdc>]
                     Send USDC to an address. Omit --amount to send your full
-                    balance. Your wallet pays the network fee (needs a little SOL).
+                    balance. Your agent pays the network fee (needs a little SOL).
   --rpc-url=<url>   Solana RPC endpoint (default mainnet-beta)
   --debug           Verbose output for troubleshooting
   -h, --help        Show this help
 
-Privacy: this tool collects NO telemetry. Your wallet key stays on your machine;
+Privacy: this tool collects NO telemetry. Your key stays on your machine;
 Omniology never sees it (it only pays the network fee). Terms: https://omniology.ai/terms
 `;
