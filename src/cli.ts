@@ -11,9 +11,13 @@ import { Connection, Keypair } from "@solana/web3.js";
 import { parseArgs, HELP_TEXT, type Options, type SurfaceId } from "./flags.js";
 import { banner, box, step, ok, warn, info, arrow, c } from "./ui.js";
 import { omniologyDir, keypairPath, agentPath, type AgentRecord } from "./paths.js";
-import { writeConfigAtomic, readConfig, hasOmniologyServer } from "./config.js";
+import { writeConfigAtomic, readConfig, hasOmniologyServer, resolveLaunch } from "./config.js";
 import { detectSurfaces } from "./surfaces/detect.js";
 import { installSurface } from "./surfaces/index.js";
+import { defaultExec as surfaceExec } from "./surfaces/exec.js";
+import { writeSetupDoc } from "./setup-doc.js";
+import { runVerify } from "./verify.js";
+import type { LaunchSpec } from "./surfaces/types.js";
 import { defaultExec } from "./surfaces/exec.js";
 import { currentPlatform, cursorConfigPath, findClineConfigPath } from "./hosts.js";
 import { loadKeypair, saveKeypair } from "./wallet.js";
@@ -43,6 +47,21 @@ async function ask(question: string, def = ""): Promise<string> {
 }
 
 const isEmail = (s: string): boolean => /^[^\s@]+@[^\s@]+\.[^\s@]+$/.test(s);
+
+/**
+ * Resolve how to launch the MCP server for the configs we write. Prefers the
+ * global `omniology-mcp` binary (a real executable every host can spawn) over
+ * `npx`, and on Windows tries to install it first — `npx` is a `.ps1`/`.cmd`
+ * shim there that autonomous hosts fail to spawn (the openclaw incident). Falls
+ * back to npx cleanly if the global install isn't possible.
+ */
+function resolveHostLaunch(): LaunchSpec {
+  const ensure = process.platform === "win32";
+  if (ensure) info("Making sure the omniology-mcp launcher is installed (Windows-robust; one moment)…");
+  const launch = resolveLaunch(surfaceExec, { ensure });
+  if (launch.command === "omniology-mcp") ok("Using the omniology-mcp binary (a real executable — no npx/PowerShell spawn issues).");
+  return launch;
+}
 
 function fail(message: string, debug?: unknown, debugOn = false): never {
   console.log("");
@@ -204,14 +223,13 @@ async function runReconfigure(opts: Options): Promise<void> {
     detectSurfaces().find((s) => s.installed && s.id !== "manual")?.id ??
     "manual";
 
-  const result = await installSurface(surface, {
-    keypairPath: keypairPath(),
-    agentId: agent.agent_id,
-    opts,
-    force: true,
-  });
+  const launch = resolveHostLaunch();
+  const ctx = { keypairPath: keypairPath(), agentId: agent.agent_id, opts, launch, force: true };
+  const result = await installSurface(surface, ctx);
+  const setupPath = writeSetupDoc(ctx);
   console.log("");
   ok(`Done${result.verified ? " (verified)" : ""}. ${result.openHint}`);
+  info(`Universal setup (any host): ${setupPath}`);
 }
 
 // ── Whoami mode (--whoami) ────────────────────────────────────────────────────
@@ -354,8 +372,14 @@ async function runSetup(opts: Options, importedKp?: Keypair): Promise<void> {
   // (re)connect the host. --resume forces the gate flow instead.
   const existingAgent = detectExistingSetup();
   if (existingAgent && !opts.resume) {
-    info("Existing agent detected — skipping onboarding (use --reset to start over, or --reconfigure to update the host).");
-    const result = await installSurface(surface, { keypairPath: keypairPath(), agentId: existingAgent.agent_id, opts });
+    const w = existsSync(keypairPath()) ? loadKeypair(keypairPath()).publicKey.toBase58() : "";
+    info(`Existing agent detected — reusing it (agent ${existingAgent.agent_id.slice(0, 8)}…, wallet ${w.slice(0, 8)}…). No new agent created.`);
+    info("(Use --reset to start over, or --reconfigure to just refresh the host connector.)");
+    const launch = resolveHostLaunch();
+    const ctx = { keypairPath: keypairPath(), agentId: existingAgent.agent_id, opts, launch };
+    const result = await installSurface(surface, ctx);
+    const setupPath = writeSetupDoc(ctx);
+    info(`Universal setup (any host): ${setupPath}`);
     completionBox(DASHBOARD_URL, result.openHint);
     return;
   }
@@ -395,7 +419,11 @@ async function runSetup(opts: Options, importedKp?: Keypair): Promise<void> {
   writeAgentJson(agentId, gateResult.walletAddress, gateResult.email);
 
   info("Connecting Omniology to your AI host…");
-  const result = await installSurface(surface, { keypairPath: keypairPath(), agentId, opts });
+  const launch = resolveHostLaunch();
+  const ctx = { keypairPath: keypairPath(), agentId, opts, launch };
+  const result = await installSurface(surface, ctx);
+  const setupPath = writeSetupDoc(ctx);
+  info(`Universal setup (any host, incl. hand-built): ${setupPath}`);
   completionBox(DASHBOARD_URL, result.openHint);
 }
 
@@ -412,6 +440,12 @@ async function main(): Promise<void> {
   if (opts.whoami) {
     await runWhoami(opts);
     return;
+  }
+
+  // Verify mode: is the agent wired up + ready to compete (or the exact blocker)?
+  if (opts.verify) {
+    const ready = await runVerify();
+    process.exit(ready ? 0 : 1);
   }
 
   // Withdraw mode: move USDC out using the existing wallet, no setup flow.

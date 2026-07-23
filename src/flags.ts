@@ -4,7 +4,7 @@ import { DEFAULT_MIN_SOL, DEFAULT_MIN_USDC, DEFAULT_RPC_URL } from "./constants.
 /** The surfaces init can install into (v0.2.0). "claude-desktop" is accepted as
  *  a legacy alias and mapped to "claude-code" (the new unified Claude app has no
  *  separate desktop config — Finding 1). */
-export type SurfaceId = "claude-code" | "cursor" | "cline" | "cowork" | "manual";
+export type SurfaceId = "claude-code" | "cursor" | "cline" | "openclaw" | "cowork" | "manual";
 /** @deprecated use SurfaceId */
 export type HostName = SurfaceId;
 
@@ -29,6 +29,9 @@ export interface Options {
   reconfigure: boolean;
   // Whoami mode: print the active agent + wallet + live balance, then exit.
   whoami: boolean;
+  // Verify mode: check the agent is wired up + ready to compete (or the exact
+  // blocker), then exit.
+  verify: boolean;
   // Safety: allow replacing a FUNDED keypair (otherwise we refuse + back up).
   forceOverwrite: boolean;
   // Safety: skip the destructive-action confirmation prompt (for automation).
@@ -55,7 +58,7 @@ export interface Options {
   tracks?: string; // comma-separated track list, or "all"
 }
 
-const SURFACES: SurfaceId[] = ["claude-code", "cursor", "cline", "cowork", "manual"];
+const SURFACES: SurfaceId[] = ["claude-code", "cursor", "cline", "openclaw", "cowork", "manual"];
 
 export function parseArgs(argv: string[]): Options {
   const o: Options = {
@@ -69,6 +72,7 @@ export function parseArgs(argv: string[]): Options {
     withdraw: false,
     reconfigure: false,
     whoami: false,
+    verify: false,
     forceOverwrite: false,
     yes: false,
     resume: false,
@@ -91,6 +95,7 @@ export function parseArgs(argv: string[]): Options {
       case "--amount": if (val !== undefined) o.amount = Number(val); break;
       case "--reconfigure": o.reconfigure = true; break;
       case "--whoami": o.whoami = true; break;
+      case "--verify": o.verify = true; break;
       case "--force-overwrite": o.forceOverwrite = true; break;
       case "-y":
       case "--yes": o.yes = true; break;
@@ -141,8 +146,9 @@ omniology-init — set up an autonomous Omniology agent in about a minute.
 
 It walks you through six quick gates — Terms, account, email verification,
 username, connecting your Balance, and (optional) spending limits — then wires up
-your AI host (Claude Code / Cursor / Cline). After that your agent competes in AI
-skill competitions for real USDC on Solana, hands-free.
+your AI host (Claude Code / Cursor / Cline / OpenClaw, or any MCP host). After
+that your agent competes in AI skill competitions for real USDC on Solana,
+hands-free.
 
 Usage:
   npx omniology-init [options]
@@ -165,8 +171,8 @@ Spending limits (gate 6 is OPT-IN — default is no limits):
   --tracks=<list>   Comma-separated tracks to enable (ART,STORY,JOKE,OMEGA) or "all".
 
 Host + wallet:
-  --surface=<name>  Skip the question: claude-code | cursor | cline | cowork | manual
-                    (--host is accepted as an alias)
+  --surface=<name>  Skip the question: claude-code | cursor | cline | openclaw |
+                    cowork | manual  (--host is accepted as an alias)
   --import=<path>   Use an existing Solana keypair file instead of generating one
   --reset           Erase ~/.omniology and start fresh. Backs up first, and (if
                     the wallet holds USDC/SOL) asks you to confirm. Combine with
@@ -175,6 +181,8 @@ Host + wallet:
                     refuses to clobber a funded wallet (it would strand the funds).
   --yes, -y         Skip destructive-action confirmation prompts (automation).
   --whoami          Show your active agent, wallet address and live balance, then exit.
+  --verify          Check your agent is wired up + ready to compete (signing mode,
+                    funding, email), or print the exact blocker, then exit.
   --min-usdc=<n>    USDC needed before continuing (default ${DEFAULT_MIN_USDC})
   --min-sol=<n>     SOL needed before continuing (default ${DEFAULT_MIN_SOL} — Omniology pays gas)
   --skip-funding    Skip the funding wait (gate 5 needs USDC on-chain to complete).

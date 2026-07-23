@@ -8,7 +8,10 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { decideOverwrite, backupOmniologyDir, type WalletStatus } from "../src/safety.js";
 import { cursorConfigPath, type PlatformEnv } from "../src/hosts.js";
-import { mcpConfigMerge, mcpConfigUpsert, hasOmniologyServer, readConfig, toPortablePath } from "../src/config.js";
+import { mcpConfigMerge, mcpConfigUpsert, hasOmniologyServer, readConfig, toPortablePath, globalBinaryInstalled, resolveLaunch, npxLaunch, binaryLaunch } from "../src/config.js";
+import { buildOpenclawAddArgs, openclawAddCommand, install as installOpenclaw } from "../src/surfaces/openclaw.js";
+import { renderSetupDoc } from "../src/setup-doc.js";
+import { decideReadiness } from "../src/verify.js";
 import { meetsThreshold, pollUntilFunded } from "../src/funding.js";
 import { buildRegisterProof } from "../src/register.js";
 import { parseArgs } from "../src/flags.js";
@@ -46,7 +49,8 @@ section("surface detection");
   const cc = withClaude.find((s) => s.id === "claude-code")!;
   check("claude-code detected when CLI returns 0", cc.installed && cc.recommended === true);
   check("manual is always available", withClaude.find((s) => s.id === "manual")!.installed);
-  check("5 surfaces presented", withClaude.length === 5);
+  check("6 surfaces presented (incl. openclaw)", withClaude.length === 6);
+  check("openclaw surface present", !!withClaude.find((s) => s.id === "openclaw"));
   const noClaude = detectSurfaces(p, fakeExec({ "claude --version": { spawnError: true, status: null } }));
   check("claude-code not installed when CLI missing", noClaude.find((s) => s.id === "claude-code")!.installed === false);
   check("claudeCodeInstalled true on status 0", claudeCodeInstalled(fakeExec({ "claude --version": { status: 0 } })));
@@ -104,6 +108,79 @@ section("config merge + portable (retained)");
   check("preserves other server + top key", !!(m.config.mcpServers as Record<string, unknown>).other && m.config.top === 1);
   check("detects existing by url", hasOmniologyServer({ mcpServers: { x: { url: "https://omniology-engine.fly.dev/mcp" } } }));
   check("missing file → {}", JSON.stringify(readConfig("/no/such.json")) === "{}");
+}
+
+section("Windows-robust launch resolution");
+{
+  const env = { OMNIOLOGY_KEYPAIR_PATH: "C:/k.json", OMNIOLOGY_AGENT_ID: "id-1" };
+  const nlsInstalled = fakeExec({ "npm ls -g --depth=0 @omniology/mcp-server": { status: 0, stdout: "/usr/lib\n└── @omniology/mcp-server@2.2.5" } });
+  const nlsMissing = fakeExec({ "npm ls -g": { status: 1, stdout: "" } });
+  check("globalBinaryInstalled true when npm ls -g lists it", globalBinaryInstalled(nlsInstalled));
+  check("globalBinaryInstalled false when absent", globalBinaryInstalled(nlsMissing) === false);
+  check("resolveLaunch → binary when installed", resolveLaunch(nlsInstalled).command === "omniology-mcp");
+  check("resolveLaunch → npx when not installed (no ensure)", resolveLaunch(nlsMissing).command === "npx");
+  // ensure installs then re-checks: first ls fails, install ok, second ls succeeds
+  let lsCalls = 0;
+  const ensureExec: Exec = (cmd, args) => {
+    const key = `${cmd} ${args.join(" ")}`;
+    if (key.startsWith("npm ls -g")) return { status: lsCalls++ === 0 ? 1 : 0, stdout: lsCalls > 1 ? "@omniology/mcp-server@2.2.5" : "", stderr: "", spawnError: false };
+    if (key.startsWith("npm i -g")) return { status: 0, stdout: "", stderr: "", spawnError: false };
+    return { status: 1, stdout: "", stderr: "", spawnError: false };
+  };
+  check("resolveLaunch ensure installs then uses binary", resolveLaunch(ensureExec, { ensure: true }).command === "omniology-mcp");
+  // the binary launch has no args; npx carries -y @latest
+  check("binaryLaunch has empty args", binaryLaunch().args.length === 0);
+  check("npxLaunch carries @latest", npxLaunch().args.join(" ").includes("@omniology/mcp-server@latest"));
+  // config writers honor the chosen launch
+  const merged = mcpConfigMerge({}, env, binaryLaunch());
+  const srv = (merged.config.mcpServers as Record<string, { command: string; args: string[] }>).omniology!;
+  check("merge writes binary command when binaryLaunch given", srv.command === "omniology-mcp" && srv.args.length === 0);
+}
+
+section("openclaw surface");
+{
+  const args = buildOpenclawAddArgs("C:\\Users\\bro\\.omniology\\keypair.json", "agent-9", npxLaunch());
+  check("openclaw add uses mcp add omniology", args[0] === "mcp" && args[1] === "add" && args[2] === "omniology");
+  check("openclaw passes --command", args.includes("--command") && args.includes("npx"));
+  check("openclaw passes npx args as --arg", args.filter((a) => a === "--arg").length === 2);
+  check("openclaw keypair env forward-slashed", args.includes("OMNIOLOGY_KEYPAIR_PATH=C:/Users/bro/.omniology/keypair.json"));
+  const binArgs = buildOpenclawAddArgs("/k.json", "a", binaryLaunch());
+  check("openclaw binary launch has no --arg", !binArgs.includes("--arg") && binArgs.includes("omniology-mcp"));
+  check("openclaw command string well-formed", /openclaw mcp add omniology --command/.test(openclawAddCommand({ keypairPath: "/k", agentId: "a", opts: {} as never, launch: npxLaunch() })));
+
+  const ctx = { keypairPath: "/home/bro/.omniology/keypair.json", agentId: "a-1", opts: {} as never, launch: npxLaunch() };
+  const okExec = fakeExec({ "mcp add omniology": { status: 0, stdout: "added omniology" }, "mcp list": { status: 0, stdout: "omniology (stdio)" } });
+  const r1 = await installOpenclaw(ctx, okExec);
+  check("openclaw install ok + verified", r1.ok && r1.verified === true);
+  const noCli = fakeExec({ "mcp add omniology": { spawnError: true, status: null } });
+  const r2 = await installOpenclaw(ctx, noCli);
+  check("openclaw missing CLI → ok:false, verified:null (prints command)", r2.ok === false && r2.verified === null);
+}
+
+section("universal SETUP.md");
+{
+  const ctx = { keypairPath: "/home/bro/.omniology/keypair.json", agentId: "agent-42", opts: {} as never, launch: binaryLaunch() };
+  const doc = renderSetupDoc(ctx);
+  check("SETUP.md names the agent id", doc.includes("agent-42"));
+  check("SETUP.md has the 3-call compete loop", doc.includes("list_active_contests") && doc.includes("submit_entry") && doc.includes("check_payout"));
+  check("SETUP.md forbids hand-signing", doc.includes("sign anything yourself") || doc.includes("never build or sign"));
+  check("SETUP.md reflects the chosen launch (omniology-mcp)", doc.includes("omniology-mcp"));
+  check("SETUP.md includes the openclaw CLI path", doc.includes("openclaw mcp add"));
+}
+
+section("--verify readiness (pure decision)");
+{
+  const W = "2dqiEjzf16XJiVr9cp5xzf5DfogqxbgiVAxP4hcLk5px";
+  const agent = { agent_id: "3ce039b6-0000-0000-0000-000000000000", wallet_address: W };
+  const readyR = decideReadiness(W, agent, { registered: true, signing_mode: "local_key", can_enter_contests: true, available_usdc: 1 });
+  check("ready when can_enter_contests", readyR.ready && readyR.lines.some((l) => /READY/.test(l)));
+  const blockedR = decideReadiness(W, agent, { registered: true, signing_mode: "local_key", can_enter_contests: false, blocking_reasons: ["EMAIL_NOT_VERIFIED", "INSUFFICIENT_USDC"], remediation: [{ reason: "INSUFFICIENT_USDC", action: "deposit", deposit_address: W, min_usdc: 0.01 }] });
+  check("not ready lists email blocker", !blockedR.ready && blockedR.lines.some((l) => /Email not verified/.test(l)));
+  check("not ready lists funding blocker w/ address", blockedR.lines.some((l) => l.includes(W) && /USDC/.test(l)));
+  const mismatchR = decideReadiness("SomeOtherWalletPubkey1111111111111111111111", agent, null);
+  check("mismatched local key → can't self-sign", !mismatchR.ready && mismatchR.lines.some((l) => /can't self-sign/.test(l)));
+  const unreachR = decideReadiness(W, agent, null);
+  check("unreachable engine → not ready, network hint", !unreachR.ready && unreachR.lines.some((l) => /Couldn't reach the engine/.test(l)));
 }
 
 section("funding + register + flags (retained)");

@@ -71,3 +71,19 @@ export function isCowork(p: PlatformEnv): boolean {
     return false;
   }
 }
+
+/** OpenClaw's config root (`~/.openclaw`), where openclaw.json + state live. */
+export function openclawConfigDir(p: PlatformEnv): string {
+  return join(p.home, ".openclaw");
+}
+
+/**
+ * Is OpenClaw present on this machine? Detected by its config root existing
+ * (`~/.openclaw`, created by ClawX / the gateway on first run). We deliberately
+ * DON'T write openclaw.json ourselves — a running gateway's config-health
+ * watcher reverts hand edits — so the installer uses the `openclaw` CLI. This is
+ * only the "is it here at all" probe.
+ */
+export function openclawInstalled(p: PlatformEnv): boolean {
+  return existsSync(openclawConfigDir(p));
+}
