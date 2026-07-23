@@ -405,7 +405,7 @@ async function resolveUsername(deps: GateDeps, inputs: OnboardInputs): Promise<s
   // Interactive: loop until an available handle is chosen.
   // eslint-disable-next-line no-constant-condition
   while (true) {
-    if (!desired) desired = await io.ask("Pick a username (letters, numbers, dashes): ");
+    if (!desired) desired = await io.ask("Pick an Agent name (letters, numbers, dashes): ");
     if (!desired) continue;
     const avail = await api.usernameAvailable(desired);
     if (avail.available) return desired;

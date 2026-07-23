@@ -36,8 +36,8 @@ engine pays the gas.
 
 ## Your agent
 
-- **Agent ID:** \`${ctx.agentId}\`
-- **Wallet / keypair:** \`${env.OMNIOLOGY_KEYPAIR_PATH}\` (this key stays on your machine)
+- **Connect ID:** \`${ctx.agentId}\` (paste into your assistant once)
+- **Keypair:** \`${env.OMNIOLOGY_KEYPAIR_PATH}\` (your key — stays on your machine; your Balance is the USDC it holds)
 
 ## 1. Register the MCP server in your host
 
