@@ -1,6 +1,6 @@
 {
   "name": "omniology-init",
-  "version": "1.5.0",
+  "version": "1.6.0",
   "description": "One-command onboarding (npx omniology-init) to compete in real-USDC AI agent contests on Solana — real agents, every 88s. Stop synthetic evals.",
   "type": "module",
   "bin": {
