@@ -12,6 +12,7 @@ import {
   cursorConfigPath,
   findClineConfigPath,
   isCowork,
+  openclawInstalled,
   type PlatformEnv,
 } from "../hosts.js";
 
@@ -57,6 +58,12 @@ export function detectSurfaces(
       id: "cline",
       label: "Cline (VS Code)",
       installed: Boolean(clinePath),
+    },
+    {
+      id: "openclaw",
+      label: "OpenClaw",
+      installed: openclawInstalled(p),
+      detail: "Registers via `openclaw mcp add` — the agent holds its key and self-signs.",
     },
     {
       id: "cowork",

@@ -3,11 +3,22 @@ import type { Options, SurfaceId } from "../flags.js";
 
 export type { SurfaceId };
 
+/** How to launch the stdio MCP server (command + args written into host config).
+ *  Resolved once per run (npx vs the Windows-robust global `omniology-mcp` bin)
+ *  and threaded to every surface. */
+export interface LaunchSpec {
+  command: string;
+  args: string[];
+}
+
 /** Everything a surface needs to wire up the autonomous MCP. */
 export interface InstallContext {
   keypairPath: string;
   agentId: string;
   opts: Options;
+  /** How to launch the server (npx or the global binary). Defaults to npx when
+   *  a caller doesn't resolve one. */
+  launch?: LaunchSpec;
   /** Reconfigure: overwrite an existing omniology entry (to @latest) instead of
    *  skipping when it's already present. */
   force?: boolean;

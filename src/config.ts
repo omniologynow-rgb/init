@@ -8,6 +8,59 @@
 import { readFileSync, writeFileSync, mkdirSync, renameSync } from "node:fs";
 import { dirname, join } from "node:path";
 import { MCP_SERVER_PKG, MCP_SERVER_SPEC, MCP_URL } from "./constants.js";
+import type { Exec, LaunchSpec } from "./surfaces/types.js";
+
+export type { LaunchSpec };
+
+/**
+ * How to launch the stdio MCP server. `npx -y @omniology/mcp-server@latest` is
+ * the portable default, but on Windows `npx` resolves to a `.ps1`/`.cmd` shim
+ * that many autonomous hosts fail to spawn (`spawn ENOENT`, PowerShell pipe
+ * hangs — the openclaw incident). When the package is installed globally its
+ * `omniology-mcp` bin is a real executable on PATH, which every host can spawn
+ * — so we prefer it whenever it's available.
+ */
+
+/** The portable npx launch (works wherever the host resolves npx correctly). */
+export function npxLaunch(): LaunchSpec {
+  return { command: "npx", args: ["-y", MCP_SERVER_SPEC] };
+}
+
+/** The global-binary launch (a real executable — Windows-robust). */
+export function binaryLaunch(): LaunchSpec {
+  return { command: "omniology-mcp", args: [] };
+}
+
+/** Is `@omniology/mcp-server` installed globally (so `omniology-mcp` is on PATH)? */
+export function globalBinaryInstalled(exec: Exec): boolean {
+  const r = exec("npm", ["ls", "-g", "--depth=0", MCP_SERVER_PKG]);
+  return !r.spawnError && r.status === 0 && r.stdout.includes(MCP_SERVER_PKG);
+}
+
+/**
+ * Best-effort: make sure the global `omniology-mcp` binary exists, installing it
+ * if missing. Returns true if the binary is available afterwards. Never throws —
+ * a failed global install just means we fall back to npx.
+ */
+export function ensureGlobalBinary(exec: Exec): boolean {
+  if (globalBinaryInstalled(exec)) return true;
+  const r = exec("npm", ["i", "-g", MCP_SERVER_SPEC]);
+  if (r.spawnError || r.status !== 0) return false;
+  return globalBinaryInstalled(exec);
+}
+
+/**
+ * Resolve the launch to write into host configs. Prefers the global binary when
+ * present (Windows-robust); optionally tries to install it first (`ensure`),
+ * which we do on Windows where npx-as-a-shim is the known failure. Falls back to
+ * npx everywhere else.
+ */
+export function resolveLaunch(exec: Exec, opts: { ensure?: boolean } = {}): LaunchSpec {
+  if (opts.ensure ? ensureGlobalBinary(exec) : globalBinaryInstalled(exec)) {
+    return binaryLaunch();
+  }
+  return npxLaunch();
+}
 
 /**
  * Normalize a filesystem path to forward slashes for use in config env values.
@@ -51,14 +104,14 @@ export interface MergeResult {
  * every existing entry. If an Omniology connector already exists, returns the
  * config unchanged with alreadyPresent=true.
  */
-export function mcpConfigMerge(existing: Json, env: OmniologyServerEnv): MergeResult {
+export function mcpConfigMerge(existing: Json, env: OmniologyServerEnv, launch: LaunchSpec = npxLaunch()): MergeResult {
   if (hasOmniologyServer(existing)) {
     return { config: existing, alreadyPresent: true };
   }
   const servers = { ...((existing.mcpServers ?? {}) as Record<string, unknown>) };
   servers["omniology"] = {
-    command: "npx",
-    args: ["-y", MCP_SERVER_SPEC],
+    command: launch.command,
+    args: launch.args,
     env: {
       OMNIOLOGY_KEYPAIR_PATH: env.OMNIOLOGY_KEYPAIR_PATH,
       OMNIOLOGY_AGENT_ID: env.OMNIOLOGY_AGENT_ID,
@@ -72,11 +125,11 @@ export function mcpConfigMerge(existing: Json, env: OmniologyServerEnv): MergeRe
  * --reconfigure to update an existing connector to @latest. Preserves all other
  * servers.
  */
-export function mcpConfigUpsert(existing: Json, env: OmniologyServerEnv): Json {
+export function mcpConfigUpsert(existing: Json, env: OmniologyServerEnv, launch: LaunchSpec = npxLaunch()): Json {
   const servers = { ...((existing.mcpServers ?? {}) as Record<string, unknown>) };
   servers["omniology"] = {
-    command: "npx",
-    args: ["-y", MCP_SERVER_SPEC],
+    command: launch.command,
+    args: launch.args,
     env: {
       OMNIOLOGY_KEYPAIR_PATH: env.OMNIOLOGY_KEYPAIR_PATH,
       OMNIOLOGY_AGENT_ID: env.OMNIOLOGY_AGENT_ID,
@@ -110,13 +163,13 @@ export function writeConfigAtomic(path: string, config: Json): void {
 }
 
 /** The connector JSON we print in manual mode. */
-export function manualConfigSnippet(env: OmniologyServerEnv): string {
+export function manualConfigSnippet(env: OmniologyServerEnv, launch: LaunchSpec = npxLaunch()): string {
   return JSON.stringify(
     {
       mcpServers: {
         omniology: {
-          command: "npx",
-          args: ["-y", MCP_SERVER_SPEC],
+          command: launch.command,
+          args: launch.args,
           env: {
             OMNIOLOGY_KEYPAIR_PATH: env.OMNIOLOGY_KEYPAIR_PATH,
             OMNIOLOGY_AGENT_ID: env.OMNIOLOGY_AGENT_ID,
