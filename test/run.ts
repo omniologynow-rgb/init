@@ -11,7 +11,7 @@ import { cursorConfigPath, type PlatformEnv } from "../src/hosts.js";
 import { mcpConfigMerge, mcpConfigUpsert, hasOmniologyServer, readConfig, toPortablePath, globalBinaryInstalled, resolveLaunch, npxLaunch, binaryLaunch } from "../src/config.js";
 import { buildOpenclawAddArgs, openclawAddCommand, install as installOpenclaw } from "../src/surfaces/openclaw.js";
 import { renderSetupDoc } from "../src/setup-doc.js";
-import { discoverAgents, type DiscoverDeps } from "../src/agents.js";
+import { discoverAgents, readConfiguredAgentIds, identityMismatches, type DiscoverDeps } from "../src/agents.js";
 import { decideReadiness } from "../src/verify.js";
 import { meetsThreshold, pollUntilFunded } from "../src/funding.js";
 import { buildRegisterProof } from "../src/register.js";
@@ -211,6 +211,34 @@ section("device-agent discovery (P4)");
     exists: (p) => p in badFiles, readJson: (p) => (badFiles[p] ? JSON.parse(badFiles[p]!) : null), listDir: () => [],
   };
   check("skips agent.json with no agent_id", discoverAgents(badDeps).length === 0);
+}
+
+section("identity reconcile (host config vs local)");
+{
+  const cfg = {
+    "/h/.cursor/mcp.json": JSON.stringify({ mcpServers: { omniology: { command: "npx", env: { OMNIOLOGY_AGENT_ID: "AAA-id", OMNIOLOGY_KEYPAIR_PATH: "/k" } } } }),
+    "/h/.openclaw/openclaw.json": JSON.stringify({ mcp: { servers: { omniology: { command: "omniology-mcp", env: { OMNIOLOGY_AGENT_ID: "BBB-id" } } } } }),
+    "/h/no-omni.json": JSON.stringify({ mcpServers: { other: { command: "x" } } }),
+  } as Record<string, string>;
+  const deps = {
+    sources: [
+      { surface: "cursor", path: "/h/.cursor/mcp.json" },
+      { surface: "openclaw", path: "/h/.openclaw/openclaw.json", nested: true },
+      { surface: "cline", path: "/h/no-omni.json" },
+      { surface: "missing", path: "/h/nope.json" },
+    ],
+    exists: (p: string) => p in cfg,
+    readJson: (p: string) => (cfg[p] ? JSON.parse(cfg[p]!) : null),
+  };
+  const found = readConfiguredAgentIds(deps);
+  check("reads flat mcpServers env id (cursor)", found.some((f) => f.surface === "cursor" && f.agentId === "AAA-id"));
+  check("reads nested mcp.servers env id (openclaw)", found.some((f) => f.surface === "openclaw" && f.agentId === "BBB-id"));
+  check("skips configs with no omniology entry", !found.some((f) => f.surface === "cline"));
+  check("skips missing config files", !found.some((f) => f.surface === "missing"));
+
+  check("mismatch detected when active differs", identityMismatches(found, "AAA-id").map((m) => m.agentId).join() === "BBB-id");
+  check("no mismatch when all agree", identityMismatches([{ surface: "cursor", agentId: "Z", path: "/p" }], "Z").length === 0);
+  check("no mismatch reported without an active identity", identityMismatches(found, undefined).length === 0);
 }
 
 section("device-agent flags (P4)");

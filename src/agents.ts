@@ -12,6 +12,7 @@ import { existsSync, readdirSync, readFileSync } from "node:fs";
 import { join } from "node:path";
 import { homedir } from "node:os";
 import { omniologyDir, keypairPath, agentPath, type AgentRecord } from "./paths.js";
+import { currentPlatform, cursorConfigPath, findClineConfigPath, openclawConfigDir } from "./hosts.js";
 
 export interface DiscoveredAgent {
   agentId: string;
@@ -104,4 +105,86 @@ export function discoverAgents(deps: DiscoverDeps = defaultDiscoverDeps()): Disc
 /** True when the given agent already occupies the live ~/.omniology slot. */
 export function isActiveAgent(a: DiscoveredAgent): boolean {
   return a.source === "active" && a.keypairPath === keypairPath() && a.agentJsonPath === agentPath();
+}
+
+// ── Identity reconcile: what Connect ID is each host actually configured for? ──
+//
+// A live agent's host was wired to one Connect ID while its local credentials
+// pointed at another. The tools then behaved as a different agent, and the
+// operator fell back to hand-rolled raw HTTP to get anything done. We surface
+// the mismatch up front so the device runs on ONE identity.
+
+export interface ConfiguredIdentity {
+  /** Which host config it came from (cursor / cline / openclaw). */
+  surface: string;
+  /** The OMNIOLOGY_AGENT_ID that host will run as. */
+  agentId: string;
+  /** The config file it was read from. */
+  path: string;
+}
+
+export interface ConfiguredDeps {
+  /** Config files to inspect. `nested` = OpenClaw's `mcp.servers` shape. */
+  sources: Array<{ surface: string; path: string | undefined; nested?: boolean }>;
+  exists: (p: string) => boolean;
+  readJson: (p: string) => Record<string, unknown> | null;
+}
+
+/**
+ * Read the Connect ID each installed host is configured to run as. Only reads
+ * config files — never writes, never touches keys.
+ */
+export function readConfiguredAgentIds(deps: ConfiguredDeps): ConfiguredIdentity[] {
+  const out: ConfiguredIdentity[] = [];
+  for (const src of deps.sources) {
+    if (!src.path || !deps.exists(src.path)) continue;
+    const cfg = deps.readJson(src.path);
+    if (!cfg) continue;
+    const servers = src.nested
+      ? ((cfg["mcp"] as Record<string, unknown> | undefined)?.["servers"] as Record<string, unknown> | undefined)
+      : (cfg["mcpServers"] as Record<string, unknown> | undefined);
+    if (!servers || typeof servers !== "object") continue;
+    for (const entry of Object.values(servers)) {
+      const env = (entry as { env?: Record<string, unknown> } | null)?.env;
+      const id = env?.["OMNIOLOGY_AGENT_ID"];
+      if (typeof id === "string" && id.trim() !== "") {
+        out.push({ surface: src.surface, agentId: id.trim(), path: src.path });
+        break; // one Omniology entry per host is enough
+      }
+    }
+  }
+  return out;
+}
+
+/** Real host-config locations to inspect for a configured Connect ID. */
+export function defaultConfiguredDeps(): ConfiguredDeps {
+  const p = currentPlatform();
+  const readJson = (path: string): Record<string, unknown> | null => {
+    try {
+      return JSON.parse(readFileSync(path, "utf8")) as Record<string, unknown>;
+    } catch {
+      return null;
+    }
+  };
+  return {
+    sources: [
+      { surface: "cursor", path: cursorConfigPath(p) },
+      { surface: "cline", path: findClineConfigPath(p) },
+      { surface: "openclaw", path: join(openclawConfigDir(p), "openclaw.json"), nested: true },
+    ],
+    exists: existsSync,
+    readJson,
+  };
+}
+
+/**
+ * Pure: which configured identities disagree with the agent this device would
+ * otherwise run as? Returns the mismatching entries (empty = all consistent).
+ */
+export function identityMismatches(
+  configured: ConfiguredIdentity[],
+  activeAgentId: string | undefined,
+): ConfiguredIdentity[] {
+  if (!activeAgentId) return [];
+  return configured.filter((c) => c.agentId !== activeAgentId);
 }
