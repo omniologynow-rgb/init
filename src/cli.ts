@@ -32,7 +32,13 @@ import {
 } from "./constants.js";
 import { runOnboarding, completionBox, type Gate6Choice } from "./onboarding/flow.js";
 import { readStdin } from "./onboarding/prompts.js";
-import { discoverAgents, type DiscoveredAgent } from "./agents.js";
+import {
+  discoverAgents,
+  readConfiguredAgentIds,
+  defaultConfiguredDeps,
+  identityMismatches,
+  type DiscoveredAgent,
+} from "./agents.js";
 
 const interactive = Boolean(process.stdin.isTTY && process.stdout.isTTY);
 
@@ -436,10 +442,35 @@ async function pickExistingAgent(opts: Options, surface: SurfaceId): Promise<boo
     return true;
   }
 
+  // Identity reconcile: if a host is wired to a different Connect ID than the
+  // agent we'd otherwise run as, say so loudly BEFORE the picker. Running the
+  // tools as one identity while the local credentials are another is what sends
+  // agents down the hand-rolled raw-HTTP path.
+  const activeId = agents.find((a) => a.source === "active")?.agentId;
+  const configured = readConfiguredAgentIds(defaultConfiguredDeps());
+  const mismatched = identityMismatches(configured, activeId);
+  if (mismatched.length > 0) {
+    console.log("");
+    warn("Identity mismatch — this device would run as two different agents:");
+    for (const m of mismatched) {
+      const known = agents.find((a) => a.agentId === m.agentId);
+      arrow(
+        `${m.surface} is configured for Connect ID ${m.agentId.slice(0, 8)}…` +
+          (known ? ` ("${known.name}")` : " (no local key for it on this device)"),
+      );
+    }
+    arrow(`your active local identity is Connect ID ${activeId!.slice(0, 8)}…`);
+    info("Pick ONE below — whichever you choose is rewritten into your host config, so they match.");
+  }
+
   // Show the picker (with live Balances).
   step(0, 6, "This device already has Omniology agents — pick one, or create a new one");
   const balances = await Promise.all(agents.map((a) => agentBalance(a, opts.rpcUrl)));
-  agents.forEach((a, i) => arrow(`${i + 1}. ${formatAgentLine(a, balances[i]!)}`));
+  const configuredIds = new Set(configured.map((c) => c.agentId));
+  agents.forEach((a, i) => {
+    const hostTag = configuredIds.has(a.agentId) ? c.dim(" [your host is configured for this one]") : "";
+    arrow(`${i + 1}. ${formatAgentLine(a, balances[i]!)}${hostTag}`);
+  });
   arrow(`${agents.length + 1}. ${c.bold("Create a new agent")}`);
 
   if (!interactive) {
